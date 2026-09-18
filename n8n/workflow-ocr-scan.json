@@ -1,0 +1,106 @@
+{
+  "id": "docpipeline-ocr-01",
+  "name": "DocPipeline - OCR Scan (Tesseract)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ocr-scan",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-ocr",
+      "name": "On OCR Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "docpipeline-ocr-01"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://extractor:5000/documents/{{ $('On OCR Request').item.json.body.document_id }}/ocr?lang={{ $('On OCR Request').item.json.body.lang || 'eng' }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "id": "call-ocr",
+      "name": "Run OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nif (!r.document_id) return [{ json: { error: 'unexpected response', raw: r } }];\nreturn [{ json: {\n  document_id: r.document_id,\n  engine: r.engine,\n  pages_ocr: r.pages_ocr,\n  chars: r.chars,\n  validated: r.validated,\n  status: r.validated ? 'VALIDATED -> delivering' : 'STILL FLAGGED',\n  flags: r.flags,\n  delivery_task: r.delivery_task,\n  view: 'http://100.68.212.36:5000/view/' + r.document_id\n}}];"
+      },
+      "id": "fmt",
+      "name": "Format Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "resp",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "On OCR Request": {
+      "main": [
+        [
+          {
+            "node": "Run OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run OCR": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

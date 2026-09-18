@@ -115,15 +115,24 @@ curl $EX/documents/batch -H 'Content-Type: application/json' -d '{"doc_type":"re
 ```
 Validated docs → published to RabbitMQ `job.deliver` → worker POSTs this to `TARGET_API_URL` (today `/mock/receiving`, later your ERP) → `{"accepted":true}` → task DELIVERED. Failures: backoff `5·2ⁿ` s, ≤3 attempts, then `FAILED_PERMANENT`. Content-type is sniffed from magic bytes, so mislabelled uploads still route correctly.
 
-## 5. Known gaps (be honest in UAT)
+## 5. Auto-OCR (Option 1: Tesseract — live now, no API key)
 
-1. **OCR is still human-in-the-loop** — photos/scans FLAG and wait for U4. (Planned: Qwen-vision auto-OCR via n8n.)
+Flagged scans/photos can heal themselves without Swagger:
+`POST /documents/{id}/ocr?lang=eng|ind` — OCRs the stored original (pdftoppm 200dpi → tesseract per page, max 30 pages), merges text into standard JSON, re-validates, and delivers on pass.
+Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>","lang":"eng"}` (workflow `docpipeline-ocr-01`; result includes `pages_ocr`, `chars`, `view` link).
+
+### U11 · Real MFP scan → OCR → DELIVERED — PASS ✅ (2026-09-18)
+19-page Lexmark MX722ade scan (PT Sarika sales-order set: SO → FAKTUR → receiving slip, vendor SARIKA ABADI MAKMUR BERSAMA → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → n8n webhook → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
+
+## 6. Known gaps (be honest in UAT)
+
+1. ~~OCR human-in-the-loop~~ → Tesseract auto-OCR live (U11); Qwen-VL fallback for noisy digit/precision docs pending API key.
 2. **PDF tables arrive as line text**, not cell-structured rows (xlsx does have real rows/cols). (Planned: pdfplumber pass.)
 3. Receiving **inbox view is in-memory** (last 20, cleared on restart); the DB trail in `/view` is permanent.
 4. Batch form = one doc_type/notes per submission (per-file metadata needs the API).
 5. `TARGET_API_URL` is still the mock until a real endpoint is set in compose.
 
-## 6. FAQ while testing
+## 7. FAQ while testing
 
 - Form won't open → Tailscale off. · Workflow edit ignored → must **Publish** (n8n top-right) — production runs the published version. · Payload empty in webhook → send FLAT JSON, never wrap in `{"body":...}`. · Task stuck QUEUED → worker down (`docker logs dp-worker`); sweeper self-heals within ~20 s if the bus message was missed. · n8n login loop → `N8N_SECURE_COOKIE=false` already set (USAGE §3.5).
 

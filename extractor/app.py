@@ -4,7 +4,7 @@ Validation pass: publish to Service Bus (RabbitMQ exchange 'doc_pipeline',
 routing key 'job.deliver') + commit delivery task row (transaction with job DONE).
 Validation fail: flag fields + notify n8n review webhook (the loop back).
 Also hosts /mock/receiving as stand-in downstream system."""
-import os, io, json, base64, hashlib, uuid, datetime, urllib.request
+import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request
 from pathlib import Path
 import psycopg2, psycopg2.extras
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -299,6 +299,91 @@ async def correct_fields(doc_id: str, request: Request):
         if ok:
             publish("deliver", {"task_id": task_id, "document_id": doc_id})
     return {"document_id": doc_id, "validated": ok, "delivery_task": task_id, "flags": flags}
+
+
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
+OCR_DPI = os.environ.get("OCR_DPI", "200")
+
+
+def _tesseract(png_path: str, lang: str = "eng") -> str:
+    import subprocess
+    r = subprocess.run(["tesseract", png_path, "stdout", "-l", lang, "--psm", "3"],
+                       capture_output=True, text=True, timeout=120)
+    return r.stdout
+
+
+@app.post("/documents/{doc_id}/ocr")
+def run_ocr(doc_id: str, lang: str = "eng"):
+    """Option 1 (Tesseract): OCR the STORED original (pdf-scan or image),
+    merge into standard_json, re-validate; on pass publish delivery like /correct."""
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
+        d = cur.fetchone()
+        if not d:
+            raise HTTPException(404, "document not found")
+        path = d["stored_path"]
+        if not os.path.exists(path):
+            raise HTTPException(410, "stored original file missing")
+        mime = d["mime"]
+        std = dict(d["standard_json"] or {})
+        pages_text = []
+        try:
+            if mime == "application/pdf":
+                import subprocess, tempfile
+                info = subprocess.run(["pdfinfo", path], capture_output=True, text=True).stdout
+                n = OCR_MAX_PAGES
+                for ln in info.splitlines():
+                    if ln.startswith("Pages"):
+                        n = min(OCR_MAX_PAGES, int(ln.split(":")[-1].strip()))
+                with tempfile.TemporaryDirectory() as td:
+                    prefix = os.path.join(td, "pg")
+                    subprocess.run(["pdftoppm", "-png", "-r", OCR_DPI, "-f", "1", "-l", str(n), path, prefix],
+                                   check=True, timeout=300)
+                    pngs = sorted(glob.glob(prefix + "*.png"))
+                    for i, pg in enumerate(pngs, 1):
+                        pages_text.append({"page": i, "text": _tesseract(pg, lang)})
+                std["kind"] = "pdf"
+                std["ocr_engine"] = "tesseract"
+            elif mime in ("image/jpeg", "image/png", "image/webp"):
+                pages_text = [{"page": 1, "text": _tesseract(path, lang)}]
+                std["kind"] = "image"
+                std["ocr_engine"] = "tesseract"
+            else:
+                raise HTTPException(400, f"mime not OCR-able: {mime}")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "OCR timeout")
+
+        # merge OCR text into the document content
+        if std.get("kind") == "pdf":
+            merged = []
+            base_pages = {p["page"]: p.get("text", "") for p in std.get("pages", [])}
+            for p in pages_text:
+                t = base_pages.get(p["page"], "")
+                merged.append({"page": p["page"],
+                               "text": (t + "\n" + p["text"]).strip() if len(t.strip()) < len(p["text"].strip()) else t.strip()})
+            std["pages"] = merged
+            std["page_count"] = max(std.get("page_count", 0), len(merged))
+        else:
+            std["ocr"] = pages_text[0]["text"]
+
+        env = {"schema_version": std.get("schema_version", "1.0"), "document_id": doc_id,
+               "filename": d["filename"], "sha256": d["sha256"], "extracted": std}
+        ok, flags = validate(env)
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, "
+                    "status=%s, review_loop=review_loop+1, updated=now() WHERE id=%s",
+                    (json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}),
+                     "VALIDATED" if ok else "FLAGGED", doc_id))
+        task_id = None
+        if ok:
+            task_id = str(uuid.uuid4())
+            cur.execute("INSERT INTO delivery_tasks(id,document_id,target_url,status) "
+                        "VALUES(%s,%s,%s,'QUEUED')", (task_id, doc_id, TARGET_API_URL))
+        c.commit()
+        if ok:
+            publish("deliver", {"task_id": task_id, "document_id": doc_id})
+        total_chars = sum(len(p["text"]) for p in std.get("pages", pages_text)) if std.get("kind") == "pdf" else len(std.get("ocr", ""))
+        return {"document_id": doc_id, "engine": "tesseract", "pages_ocr": len(pages_text),
+                "chars": total_chars, "validated": ok, "flags": flags, "delivery_task": task_id}
 
 
 @app.get("/documents")
