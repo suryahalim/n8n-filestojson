@@ -7,6 +7,7 @@ Also hosts /mock/receiving as stand-in downstream system."""
 import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request
 from pathlib import Path
 import psycopg2, psycopg2.extras
+from fastapi.responses import FileResponse
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 import pika
 
@@ -303,6 +304,28 @@ async def correct_fields(doc_id: str, request: Request):
 
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
 OCR_DPI = os.environ.get("OCR_DPI", "200")
+QWEN_KEY = os.environ.get("QWEN_API_KEY", "")
+QWEN_URL = os.environ.get("QWEN_URL",
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.8-flash")  # swap to qwen-vl-ocr later
+
+
+def qwen_vision_ocr(png_bytes: bytes) -> str:
+    import urllib.request as ur
+    body = json.dumps({
+        "model": QWEN_MODEL, "max_tokens": 1800,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()}},
+            {"type": "text", "text": "Extract ALL text from this document image exactly as written, preserving line structure. Include printed AND handwritten content. Output only the text."}]}]}).encode()
+    req = ur.Request(QWEN_URL, data=body, method="POST")
+    req.add_header("Authorization", "Bearer " + QWEN_KEY)
+    req.add_header("Content-Type", "application/json")
+    with ur.urlopen(req, timeout=180) as r:
+        d = json.load(r)
+    t = d["choices"][0]["message"]["content"]
+    if isinstance(t, list):
+        t = "\n".join(x.get("text", "") for x in t)
+    return (t or "").strip()
 
 
 def _tesseract(png_path: str, lang: str = "eng") -> str:
@@ -313,7 +336,7 @@ def _tesseract(png_path: str, lang: str = "eng") -> str:
 
 
 @app.post("/documents/{doc_id}/ocr")
-def run_ocr(doc_id: str, lang: str = "eng"):
+def run_ocr(doc_id: str, lang: str = "eng", engine: str = "tesseract"):
     """Option 1 (Tesseract): OCR the STORED original (pdf-scan or image),
     merge into standard_json, re-validate; on pass publish delivery like /correct."""
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -327,6 +350,8 @@ def run_ocr(doc_id: str, lang: str = "eng"):
         mime = d["mime"]
         std = dict(d["standard_json"] or {})
         pages_text = []
+        if engine == "qwen" and not QWEN_KEY:
+            raise HTTPException(500, "QWEN_API_KEY not configured on extractor")
         try:
             if mime == "application/pdf":
                 import subprocess, tempfile
@@ -341,13 +366,23 @@ def run_ocr(doc_id: str, lang: str = "eng"):
                                    check=True, timeout=300)
                     pngs = sorted(glob.glob(prefix + "*.png"))
                     for i, pg in enumerate(pngs, 1):
-                        pages_text.append({"page": i, "text": _tesseract(pg, lang)})
+                        if engine == "qwen":
+                            with open(pg, "rb") as fh:
+                                txt = qwen_vision_ocr(fh.read())
+                        else:
+                            txt = _tesseract(pg, lang)
+                        pages_text.append({"page": i, "text": txt})
                 std["kind"] = "pdf"
-                std["ocr_engine"] = "tesseract"
+                std["ocr_engine"] = engine
             elif mime in ("image/jpeg", "image/png", "image/webp"):
-                pages_text = [{"page": 1, "text": _tesseract(path, lang)}]
+                if engine == "qwen":
+                    with open(path, "rb") as fh:
+                        img_txt = qwen_vision_ocr(fh.read())
+                else:
+                    img_txt = _tesseract(path, lang)
+                pages_text = [{"page": 1, "text": img_txt}]
                 std["kind"] = "image"
-                std["ocr_engine"] = "tesseract"
+                std["ocr_engine"] = engine
             else:
                 raise HTTPException(400, f"mime not OCR-able: {mime}")
         except subprocess.TimeoutExpired:
@@ -382,8 +417,23 @@ def run_ocr(doc_id: str, lang: str = "eng"):
         if ok:
             publish("deliver", {"task_id": task_id, "document_id": doc_id})
         total_chars = sum(len(p["text"]) for p in std.get("pages", pages_text)) if std.get("kind") == "pdf" else len(std.get("ocr", ""))
-        return {"document_id": doc_id, "engine": "tesseract", "pages_ocr": len(pages_text),
+        return {"document_id": doc_id, "engine": engine, "pages_ocr": len(pages_text),
                 "chars": total_chars, "validated": ok, "flags": flags, "delivery_task": task_id}
+
+
+@app.get("/documents/{doc_id}/raw")
+def get_raw(doc_id: str, b64: int = 0):
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT stored_path,mime,filename FROM documents WHERE id=%s", (doc_id,))
+        d = cur.fetchone()
+    if not d or not os.path.exists(d["stored_path"]):
+        raise HTTPException(404, "file not found")
+    if b64:
+        with open(d["stored_path"], "rb") as fh:
+            return {"filename": d["filename"], "mime": d["mime"],
+                    "b64": base64.b64encode(fh.read()).decode()}
+    return FileResponse(d["stored_path"], media_type=d["mime"] or "application/octet-stream",
+                        filename=d["filename"])
 
 
 @app.get("/documents")

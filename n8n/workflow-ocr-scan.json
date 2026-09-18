@@ -1,6 +1,6 @@
 {
   "id": "docpipeline-ocr-01",
-  "name": "DocPipeline - OCR Scan (Tesseract)",
+  "name": "DocPipeline - OCR Scan (Tesseract | Qwen)",
   "nodes": [
     {
       "parameters": {
@@ -21,16 +21,31 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=http://extractor:5000/documents/{{ $('On OCR Request').item.json.body.document_id }}/ocr?lang={{ $('On OCR Request').item.json.body.lang || 'eng' }}",
-        "options": {
-          "timeout": 900000
-        }
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.engine || 'tesseract' }}",
+              "rightValue": "qwen",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "options2": {}
+        },
+        "options": {}
       },
-      "id": "call-ocr",
-      "name": "Run OCR",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "id": "if-engine",
+      "name": "Engine?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
         220,
         0
@@ -38,15 +53,62 @@
     },
     {
       "parameters": {
-        "jsCode": "const r = $json;\nif (!r.document_id) return [{ json: { error: 'unexpected response', raw: r } }];\nreturn [{ json: {\n  document_id: r.document_id,\n  engine: r.engine,\n  pages_ocr: r.pages_ocr,\n  chars: r.chars,\n  validated: r.validated,\n  status: r.validated ? 'VALIDATED -> delivering' : 'STILL FLAGGED',\n  flags: r.flags,\n  delivery_task: r.delivery_task,\n  view: 'http://100.68.212.36:5000/view/' + r.document_id\n}}];"
+        "method": "POST",
+        "url": "=http://extractor:5000/documents/{{ $json.body.document_id }}/ocr?engine=qwen",
+        "options": {
+          "timeout": 900000
+        }
       },
-      "id": "fmt",
-      "name": "Format Result",
+      "id": "ocr-qwen",
+      "name": "Qwen OCR (extractor)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://extractor:5000/documents/{{ $json.body.document_id }}/ocr?engine=tesseract&lang={{ $json.body.lang || 'eng' }}",
+        "options": {
+          "timeout": 900000
+        }
+      },
+      "id": "ocr-tess",
+      "name": "Tesseract OCR (extractor)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$json; r.view='http://100.68.212.36:5000/view/'+r.document_id; return [{json:r}];"
+      },
+      "id": "fmt-q",
+      "name": "Add View Link",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        440,
-        0
+        700,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$json; r.view='http://100.68.212.36:5000/view/'+r.document_id; return [{json:r}];"
+      },
+      "id": "fmt-t",
+      "name": "Add View Link 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        120
       ]
     },
     {
@@ -60,7 +122,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        660,
+        940,
         0
       ]
     }
@@ -70,25 +132,65 @@
       "main": [
         [
           {
-            "node": "Run OCR",
+            "node": "Engine?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Run OCR": {
+    "Engine?": {
       "main": [
         [
           {
-            "node": "Format Result",
+            "node": "Qwen OCR (extractor)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tesseract OCR (extractor)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Format Result": {
+    "Qwen OCR (extractor)": {
+      "main": [
+        [
+          {
+            "node": "Add View Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add View Link": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tesseract OCR (extractor)": {
+      "main": [
+        [
+          {
+            "node": "Add View Link 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add View Link 2": {
       "main": [
         [
           {

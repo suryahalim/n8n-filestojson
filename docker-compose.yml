@@ -23,6 +23,8 @@ services:
       - N8N_DEFAULT_USER_PASSWORD=${N8N_OWNER_PASS}
       - N8N_RUNNERS_ENABLED=true
       - N8N_SECURE_COOKIE=false
+      - QWEN_API_KEY=${QWEN_API_KEY}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - EXECUTIONS_DATA_PRUNE=true
       - EXECUTIONS_DATA_MAX_AGE=336
     volumes:
@@ -80,6 +82,7 @@ services:
       - RABBIT_HOST=rabbitmq
       - RABBIT_USER=${RABBITMQ_USER}
       - RABBIT_PASS=${RABBITMQ_PASS}
+      - QWEN_API_KEY=${QWEN_API_KEY}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
       - N8N_REVIEW_WEBHOOK=http://n8n:5678/webhook/review-flagged

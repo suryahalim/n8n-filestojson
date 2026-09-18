@@ -119,7 +119,8 @@ Validated docs → published to RabbitMQ `job.deliver` → worker POSTs this to 
 
 Flagged scans/photos can heal themselves without Swagger:
 `POST /documents/{id}/ocr?lang=eng|ind` — OCRs the stored original (pdftoppm 200dpi → tesseract per page, max 30 pages), merges text into standard JSON, re-validates, and delivers on pass.
-Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>","lang":"eng"}` (workflow `docpipeline-ocr-01`; result includes `pages_ocr`, `chars`, `view` link).
+Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>","lang":"eng","engine":"tesseract|qwen"}` (workflow `docpipeline-ocr-01`; result includes `pages_ocr`, `chars`, `view` link).
+**Engine `qwen`** (temporary model `qwen3.8-flash` via Token Plan vision; swap = env `QWEN_MODEL` on dp-extractor) — key lives in extractor env `QWEN_API_KEY` (from `.env`, gitignored), NOT in n8n nodes. Photos/handwriting: Tesseract fails → use qwen.
 
 ### U11 · Real MFP scan → OCR → DELIVERED — PASS ✅ (2026-09-18)
 19-page Lexmark MX722ade scan (vendor PT SARANA ABADI MAKMUR BERSAMA, SO→FAKTUR→receiving slip → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → n8n webhook → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
