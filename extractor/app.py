@@ -388,14 +388,21 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = "tesseract"):
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "OCR timeout")
 
-        # merge OCR text into the document content
+        # merge OCR text into the document content.
+        # If the existing page text came from a PREVIOUS OCR run (ocr_engine set),
+        # the new engine's output REPLACES it wholesale; otherwise keep the richer
+        # of native-text-layer vs OCR result per page.
+        prev_was_ocr = bool(std.get("ocr_engine"))
         if std.get("kind") == "pdf":
             merged = []
             base_pages = {p["page"]: p.get("text", "") for p in std.get("pages", [])}
             for p in pages_text:
                 t = base_pages.get(p["page"], "")
-                merged.append({"page": p["page"],
-                               "text": (t + "\n" + p["text"]).strip() if len(t.strip()) < len(p["text"].strip()) else t.strip()})
+                if prev_was_ocr:
+                    keep = p["text"].strip()
+                else:
+                    keep = (t + "\n" + p["text"]).strip() if len(t.strip()) < len(p["text"].strip()) else t.strip()
+                merged.append({"page": p["page"], "text": keep})
             std["pages"] = merged
             std["page_count"] = max(std.get("page_count", 0), len(merged))
         else:
