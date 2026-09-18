@@ -1,0 +1,155 @@
+{
+  "id": "docpipeline-form-upload",
+  "name": "Doc Pipeline - IT Upload Form",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "path": "it-upload",
+        "formTitle": "IT Document Upload",
+        "formDescription": "Upload one document (PDF / Excel / image). It is extracted, validated, and delivered to the target system automatically.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Document file",
+              "fieldType": "file",
+              "requiredField": true,
+              "acceptFileTypes": ".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg",
+              "placeholder": "Select one or more files - max 25 MB each",
+              "multipleFiles": true
+            },
+            {
+              "fieldLabel": "Document type",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Invoice"
+                  },
+                  {
+                    "option": "Purchase Order"
+                  },
+                  {
+                    "option": "Report"
+                  },
+                  {
+                    "option": "SOP / Policy"
+                  },
+                  {
+                    "option": "Other"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Notes",
+              "fieldType": "textarea",
+              "requiredField": false,
+              "placeholder": "Optional context for the receiving system"
+            }
+          ]
+        },
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "form-trigger",
+      "name": "On form submission",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "it-upload-form"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://extractor:5000/documents/batch",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 120000,
+          "allowUnauthorizedCerts": false
+        }
+      },
+      "id": "http-extract",
+      "name": "Send to Extractor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=Batch result \u2014 {{ $json.total }} file(s)\n{{ ($json.summary ? Object.entries($json.summary).map(e => e[0] + ': ' + e[1]).join(' | ') : '') }}\n\n{{ $json.results.map(r => (r.filename || '?') + '  ->  ' + r.status + (r.document_id ? '  (' + r.document_id.slice(0,8) + '\u2026)' : '')).join('\\n') }}",
+        "options": {}
+      },
+      "id": "respond-done",
+      "name": "Respond With Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const it = items[0].json;\nconst label = (it['Document type'] || 'Other').toString().trim().toLowerCase();\nconst MAP = {\"invoice\": \"invoice\", \"purchase order\": \"purchase_order\", \"report\": \"report\", \"sop / policy\": \"sop_policy\", \"other\": \"other\"};\nlet notes = (it['Notes'] || '').toString();\nnotes = notes.replace(/[^A-Za-z0-9._ -]/g, '_').slice(0,200);\n\nconst bin = items[0].binary || {};\nconst keys = Object.keys(bin).filter(k => /^Document_file/.test(k));\nconst files = [];\nfor (const k of keys) {\n  // binary may live on disk (filesystem mode) - read true bytes via helper\n  const buf = await this.helpers.getBinaryDataBuffer(0, k);\n  const mime = bin[k].mimeType || '';\n  files.push({ name: bin[k].fileName || k, mime: mime, data_b64: buf.toString('base64') });\n}\nreturn [{ json: { body: { doc_type: MAP[label] || 'other', notes: notes, skip_existing: true, files: files } } }];"
+      },
+      "id": "normalize",
+      "name": "Prepare Batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        120,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Prepare Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Batch": {
+      "main": [
+        [
+          {
+            "node": "Send to Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Extractor": {
+      "main": [
+        [
+          {
+            "node": "Respond With Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

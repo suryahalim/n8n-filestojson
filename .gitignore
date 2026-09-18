@@ -1,0 +1,8 @@
+.env
+*.env
+!.env.example
+backups/
+data/
+__pycache__/
+*.pyc
+n8n/credentials*

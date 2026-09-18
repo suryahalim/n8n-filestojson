@@ -1,0 +1,211 @@
+{
+ "name": "Doc Pipeline - Review Flagged Fields",
+ "nodes": [
+  {
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "review-flagged",
+    "responseMode": "responseNode",
+    "options": {}
+   },
+   "id": "a1",
+   "name": "Webhook: Flagged Docs",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    0,
+    0
+   ],
+   "webhookId": "review-flagged"
+  },
+  {
+   "parameters": {
+    "method": "GET",
+    "url": "=http://extractor:5000/documents/{{ $json.body.document_id }}"
+   },
+   "id": "a2",
+   "name": "Fetch Document",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    220,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "rules": {
+     "values": [
+      {
+       "conditions": {
+        "options": {
+         "caseSensitive": false,
+         "version": 2
+        },
+        "combinator": "and",
+        "conditions": [
+         {
+          "leftValue": "={{ $json.standard_json.kind }}",
+          "operator": {
+           "type": "string",
+           "operation": "equals",
+           "singleValue": true
+          },
+          "rightValue": "image"
+         }
+        ]
+       },
+       "renameOutput": true,
+       "outputKey": "needs-ocr"
+      }
+     ]
+    },
+    "options": {
+     "fallbackOutput": "extra"
+    }
+   },
+   "id": "a3",
+   "name": "Switch by Kind",
+   "type": "n8n-nodes-base.switch",
+   "typeVersion": 3,
+   "position": [
+    440,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "respondWith": "json",
+    "responseBody": "={{ JSON.stringify({status:'review_required', document_id: $json.document_id || $('Webhook: Flagged Docs').item.json.body.document_id, flagged: $('Webhook: Flagged Docs').item.json.body.flags}) }}",
+    "options": {}
+   },
+   "id": "a4",
+   "name": "Respond Review Queued",
+   "type": "n8n-nodes-base.respondToWebhook",
+   "typeVersion": 1.1,
+   "position": [
+    700,
+    120
+   ]
+  },
+  {
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "review-complete",
+    "responseMode": "responseNode",
+    "options": {}
+   },
+   "id": "a5",
+   "name": "Webhook: Review Complete",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    0,
+    300
+   ],
+   "webhookId": "review-complete"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "=http://extractor:5000/documents/{{ $json.body.document_id }}/correct",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({extracted: $json.body.extracted}) }}",
+    "options": {}
+   },
+   "id": "a6",
+   "name": "Submit Correction + Revalidate",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    220,
+    300
+   ]
+  },
+  {
+   "parameters": {
+    "respondWith": "json",
+    "responseBody": "={{ JSON.stringify({routed: true, validated: $json.validated, delivery_task: $json.delivery_task}) }}",
+    "options": {}
+   },
+   "id": "a7",
+   "name": "Respond Correction Result",
+   "type": "n8n-nodes-base.respondToWebhook",
+   "typeVersion": 1.1,
+   "position": [
+    440,
+    300
+   ]
+  }
+ ],
+ "connections": {
+  "Webhook: Flagged Docs": {
+   "main": [
+    [
+     {
+      "node": "Fetch Document",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch Document": {
+   "main": [
+    [
+     {
+      "node": "Switch by Kind",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Switch by Kind": {
+   "main": [
+    [
+     {
+      "node": "Respond Review Queued",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Respond Review Queued",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Webhook: Review Complete": {
+   "main": [
+    [
+     {
+      "node": "Submit Correction + Revalidate",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Submit Correction + Revalidate": {
+   "main": [
+    [
+     {
+      "node": "Respond Correction Result",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1"
+ },
+ "id": "docpipeline-review-01",
+ "active": false
+}
