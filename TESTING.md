@@ -122,7 +122,7 @@ Flagged scans/photos can heal themselves without Swagger:
 Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>","lang":"eng"}` (workflow `docpipeline-ocr-01`; result includes `pages_ocr`, `chars`, `view` link).
 
 ### U11 · Real MFP scan → OCR → DELIVERED — PASS ✅ (2026-09-18)
-19-page Lexmark MX722ade scan (PT Sarika sales-order set: SO → FAKTUR → receiving slip, vendor SARIKA ABADI MAKMUR BERSAMA → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → n8n webhook → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
+19-page Lexmark MX722ade scan (vendor PT SARANA ABADI MAKMUR BERSAMA, SO→FAKTUR→receiving slip → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → n8n webhook → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
 
 ## 6. Known gaps (be honest in UAT)
 

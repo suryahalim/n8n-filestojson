@@ -51,7 +51,7 @@ docker-compose.yml        # 5 services
 db-init/                  # postgres schema + n8n db creation
 extractor/                # FastAPI: upload/batch/track/views/correct/mock
 worker/                   # RabbitMQ consumer w/ backoff + sweeper
-n8n/                      # workflow JSONs: form-upload (multi-file), review-loop
+n8n/                      # workflows: form-upload (multi-file), review-loop, ocr-scan
 tests/                    # e2e scripts + fixtures (PO story S1–S8)
 ```
 
