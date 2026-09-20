@@ -83,6 +83,7 @@ services:
       - RABBIT_USER=${RABBITMQ_USER}
       - RABBIT_PASS=${RABBITMQ_PASS}
       - QWEN_API_KEY=${QWEN_API_KEY}
+      - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
       - N8N_REVIEW_WEBHOOK=http://n8n:5678/webhook/review-flagged

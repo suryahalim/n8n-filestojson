@@ -237,7 +237,10 @@ async def upload_batch(request: Request):
     body = await request.json()
     doc_type = body.get("doc_type") or "other"
     notes = body.get("notes") or ""
-    skip = body.get("skip_existing", True)
+    # In testing you may want identical bytes ingested repeatedly:
+    # set INGEST_ALLOW_DUP=1 on dp-extractor to bypass ALL dedupe regardless of payload.
+    allow_dup = os.environ.get("INGEST_ALLOW_DUP", "0") == "1"
+    skip = False if allow_dup else body.get("skip_existing", True)
     files = body.get("files") or []
     if not isinstance(files, list) or not files:
         raise HTTPException(400, "files: non-empty list required")
