@@ -34,9 +34,13 @@ IT document ingestion → extraction → validation → OCR → service-bus deli
                                         → DELIVERED / retry / dead
 ```
 
-**Key design rule:** API keys and model names live ONLY in the extractor (env from `~/doc-pipeline/.env`). n8n never holds or forwards secrets — its OCR workflow only routes `document_id` + engine choice to extractor endpoints. Swapping OCR models = env change + restart, zero workflow edits.
+**Key design rule:** API keys, model, and endpoint live ONLY in the extractor (runtime file `data/ocr_config.json`, editable at `/view/settings`, hot-reloaded; env vars as bootstrap). n8n never holds or forwards secrets — its OCR workflow only routes `document_id` + engine choice to extractor endpoints. Swapping OCR model/provider = save in the UI, effective instantly, zero restarts and zero workflow edits.
 
 ## Configuration (single source: `~/doc-pipeline/.env`, gitignored, mode 600)
+
+**Primary path since 2026-09-20: the Settings UI** — `http://<host>:5000/view/settings` edits endpoint URL / API key / model / default engine, saved to `data/ocr_config.json`, **hot-reloaded on the next request — no restart, no compose edit, no n8n change**. Saves are gated by a live test-connection (tiny vision call): wrong key → "key rejected (401)", wrong model name → "model not available in this plan (404)" (this is how qwen-vl-ocr's absence was caught), unreachable URL → timeout hint. `Force save` bypasses the gate. Key is never returned by the API (masked only: prefix…suffix + sha8). Optional PIN gate: set `SETTINGS_PIN` in `.env`. Design: `DESIGN_OCR_SETTINGS.md`.
+
+Env vars below are the **bootstrap/DR path** (used only until the UI saves a config; delete `data/ocr_config.json` to fall back):
 
 | Var | Default / current | Meaning |
 |---|---|---|
@@ -94,7 +98,7 @@ python3 tests/test_api_e2e.py               # green stack proof
 
 ## Maintenance runbook
 
-**Change OCR model:** edit `QWEN_MODEL` in `.env` → `docker compose up -d extractor` → test: `curl -X POST .../webhook/ocr-scan -d '{"document_id":"<flagged-id>","engine":"qwen"}'` → expect `engine:"qwen"` DELIVERED. Verify model exists in plan first (unavailable models return HTTP 404).
+**Change OCR model:** open `http://<host>:5000/view/settings` → edit Model (or Fetch models) → Test → Save. Effective immediately — no restart. CLI fallback still works: edit `QWEN_MODEL` in `.env` + `docker compose up -d extractor` (only read when `data/ocr_config.json` absent). Verify model exists in plan first (404 = not available).
 
 **Restore dedupe after testing:** `INGEST_ALLOW_DUP=0` in `.env` → `docker compose up -d extractor` → same batch upload must show `SKIPPED_DUPLICATE`; run `python3 tests/test_batch_e2e.py`.
 

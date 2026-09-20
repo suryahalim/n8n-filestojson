@@ -85,11 +85,12 @@ services:
       - QWEN_API_KEY=${QWEN_API_KEY}
       - OCR_ENGINE=${OCR_ENGINE:-qwen}
       - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
+      - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
       - N8N_REVIEW_WEBHOOK=http://n8n:5678/webhook/review-flagged
     volumes:
-      - ./data/uploads:/data/uploads
+      - ./data:/data
     depends_on:
       db:
         condition: service_healthy

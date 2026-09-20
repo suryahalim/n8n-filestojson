@@ -307,23 +307,88 @@ async def correct_fields(doc_id: str, request: Request):
 
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
 OCR_DPI = os.environ.get("OCR_DPI", "200")
-# Default OCR engine when caller doesn't specify — env-changeable (qwen|tesseract).
-DEFAULT_OCR_ENGINE = os.environ.get("OCR_ENGINE", "qwen")
-QWEN_KEY = os.environ.get("QWEN_API_KEY", "")
-QWEN_URL = os.environ.get("QWEN_URL",
-    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions")
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen3.8-flash")  # swap to qwen-vl-ocr later
 
+# --- Runtime OCR config (UI-editable, hot-reload by mtime; env = bootstrap only) ---
+# Design: DESIGN_OCR_SETTINGS.md. Precedence: /data/ocr_config.json > env > defaults.
+OCR_CONFIG_PATH = Path(os.environ.get("OCR_CONFIG_PATH", "/data/ocr_config.json"))
+_ocr_cache = {"mtime": None, "cfg": None}
 
-def qwen_vision_ocr(png_bytes: bytes) -> str:
+DEFAULT_QWEN_URL = ("https://" + "token-plan.ap-southeast-1.maas.aliyuncs.com"
+                    + "/compatible-mode/v1/chat/completions")
+
+def _env_ocr_defaults():
+    return {
+        "endpoint": os.environ.get("QWEN_URL") or DEFAULT_QWEN_URL,
+        "model": os.environ.get("QWEN_MODEL", "qwen3.8-flash"),
+        "key": os.environ.get("QWEN_API_KEY", ""),
+        "engine": os.environ.get("OCR_ENGINE", "qwen"),
+    }
+
+def load_ocr_config():
+    """mtime-cached: a UI save is live on the very next request, no restart."""
+    try:
+        mt = OCR_CONFIG_PATH.stat().st_mtime
+    except OSError:
+        mt = None
+    if mt is None:
+        cfg = _env_ocr_defaults()
+    elif _ocr_cache["mtime"] != mt:
+        try:
+            cfg = json.loads(OCR_CONFIG_PATH.read_text())
+        except Exception:
+            cfg = _env_ocr_defaults()
+        _ocr_cache.update(mtime=mt, cfg=cfg)
+    else:
+        cfg = _ocr_cache["cfg"]
+    base = _env_ocr_defaults()
+    for k in base:
+        cfg.setdefault(k, base[k])
+    return cfg
+
+def normalize_chat_url(url):
+    """Accept base or full URL; return chat-completions endpoint."""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/v1") or url.endswith("/compatible-mode"):
+        return url + "/chat/completions"
+    return url + "/v1/chat/completions"
+
+def save_ocr_config(cfg):
+    cfg = {k: v for k, v in cfg.items() if k in ("endpoint", "model", "key", "engine")}
+    cfg["endpoint"] = normalize_chat_url(cfg.get("endpoint", ""))
+    OCR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = OCR_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=1))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, OCR_CONFIG_PATH)
+    _ocr_cache["mtime"] = None  # force reload
+    return cfg
+
+def mask_key(k):
+    k = k or ""
+    if len(k) <= 8:
+        return "****" if k else "(empty)"
+    import hashlib as _h
+    return k[:4] + "…" + k[-4:] + f" (len {len(k)}, sha8 {_h.sha256(k.encode()).hexdigest()[:8]})"
+
+DEFAULT_OCR_ENGINE = None  # superseded by load_ocr_config()['engine']
+QWEN_KEY = None  # superseded by load_ocr_config()['key']
+def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
+    """Provider-agnostic vision OCR (OpenAI-compatible). cfg from UI config."""
     import urllib.request as ur
+    cfg = cfg or load_ocr_config()
+    if not cfg.get("key"):
+        raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
     body = json.dumps({
-        "model": QWEN_MODEL, "max_tokens": 1800,
+        "model": cfg["model"], "max_tokens": 1800,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()}},
             {"type": "text", "text": "Extract ALL text from this document image exactly as written, preserving line structure. Include printed AND handwritten content. Output only the text."}]}]}).encode()
-    req = ur.Request(QWEN_URL, data=body, method="POST")
-    req.add_header("Authorization", "Bearer " + QWEN_KEY)
+    req = ur.Request(cfg["endpoint"], data=body, method="POST")
+    req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
     with ur.urlopen(req, timeout=180) as r:
         d = json.load(r)
@@ -331,6 +396,9 @@ def qwen_vision_ocr(png_bytes: bytes) -> str:
     if isinstance(t, list):
         t = "\n".join(x.get("text", "") for x in t)
     return (t or "").strip()
+
+# backwards-compat alias (older code paths)
+qwen_vision_ocr = api_vision_ocr
 
 
 def _tesseract(png_path: str, lang: str = "eng") -> str:
@@ -345,7 +413,7 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
     """OCR the STORED original (pdf-scan or image), merge into standard_json,
     re-validate; on pass publish delivery like /correct.
     engine: 'qwen' (default, API — qwen3.8-flash via QWEN_MODEL) or 'tesseract' (local)."""
-    engine = engine or DEFAULT_OCR_ENGINE
+    engine = engine or load_ocr_config()["engine"]
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
         d = cur.fetchone()
@@ -357,8 +425,9 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         mime = d["mime"]
         std = dict(d["standard_json"] or {})
         pages_text = []
-        if engine == "qwen" and not QWEN_KEY:
-            raise HTTPException(500, "QWEN_API_KEY not configured on extractor")
+        ocr_cfg = load_ocr_config() if engine == "qwen" else None
+        if engine == "qwen" and not ocr_cfg.get("key"):
+            raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
         try:
             if mime == "application/pdf":
                 import subprocess, tempfile
@@ -375,21 +444,23 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                     for i, pg in enumerate(pngs, 1):
                         if engine == "qwen":
                             with open(pg, "rb") as fh:
-                                txt = qwen_vision_ocr(fh.read())
+                                txt = api_vision_ocr(fh.read(), ocr_cfg)
                         else:
                             txt = _tesseract(pg, lang)
                         pages_text.append({"page": i, "text": txt})
                 std["kind"] = "pdf"
                 std["ocr_engine"] = engine
+                if engine == "qwen": std["ocr_model"] = ocr_cfg["model"]
             elif mime in ("image/jpeg", "image/png", "image/webp"):
                 if engine == "qwen":
                     with open(path, "rb") as fh:
-                        img_txt = qwen_vision_ocr(fh.read())
+                        img_txt = api_vision_ocr(fh.read(), ocr_cfg)
                 else:
                     img_txt = _tesseract(path, lang)
                 pages_text = [{"page": 1, "text": img_txt}]
                 std["kind"] = "image"
                 std["ocr_engine"] = engine
+                if engine == "qwen": std["ocr_model"] = ocr_cfg["model"]
             else:
                 raise HTTPException(400, f"mime not OCR-able: {mime}")
         except subprocess.TimeoutExpired:
@@ -542,7 +613,7 @@ def view_list(limit: int = 50):
         f"<td>{d['size']}</td><td>{d['created']}</td></tr>" for d in docs) or \
         "<tr><td colspan='5'>no documents yet</td></tr>"
     return _page("Doc Pipeline — Documents", f"""<h1>Doc Pipeline</h1>
-<div class='sub'>Ingested documents, newest first · <a href='/view/inbox'>receiving inbox</a> · <a href='/docs'>API console</a></div>
+<div class='sub'>Ingested documents, newest first · <a href='/view/inbox'>receiving inbox</a> · <a href='/view/settings'>OCR settings</a> · <a href='/docs'>API console</a></div>
 <table><tr><th>ID</th><th>File</th><th>Status</th><th>Bytes</th><th>Created</th></tr>{rows}</table>""")
 
 
@@ -559,6 +630,163 @@ def view_inbox():
 <h1>Receiving API — inbox</h1>
 <div class='sub'>Delivery payloads the mock receiving system actually got (in-memory, last 20)</div>
 <table><tr><th>Received</th><th>Document</th><th>File</th><th>Task</th></tr>{rows}</table>""")
+
+
+SETTINGS_HTML = """<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>OCR Settings — Doc Pipeline</title>
+<style>body{font-family:system-ui,sans-serif;background:#f4f5f7;margin:0;padding:24px;color:#1a1a2e}
+.card{max-width:640px;margin:auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px #0001}
+label{display:block;font-weight:600;margin:14px 0 4px}input,select{width:100%;padding:9px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;font-size:14px}
+button{margin-top:16px;padding:10px 18px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
+button.sec{background:#e5e7eb;color:#111}#out{margin-top:14px;padding:10px;border-radius:8px;font-size:13px;white-space:pre-wrap;display:none}
+.ok{background:#e7f7ec;color:#166534;display:block}.err{background:#fde8e8;color:#991b1b;display:block}.mut{background:#eef2ff;color:#3730a3;display:block}
+.hint{font-size:12px;color:#666;margin-top:3px}.cur{font-size:12px;color:#555;background:#f1f5f9;padding:6px 8px;border-radius:6px;margin-top:4px}</style></head>
+<body><div class='card'><h2>OCR Engine Settings</h2>
+<div class='hint'>Saved to <code>data/ocr_config.json</code> — effective immediately, no restart. Env vars are bootstrap only.</div>
+<div id='cur' class='cur'>loading…</div>
+<label>Endpoint URL <span class='hint'>(OpenAI-compatible; base or full /chat/completions both OK)</span></label>
+<input id='endpoint' placeholder='https://api.openai.com/v1'>
+<label>API Key <span class='hint'>(blank = keep current)</span></label>
+<input id='key' type='password' placeholder='sk-…' autocomplete='off'>
+<label>Model</label>
+<input id='model' list='models' placeholder='qwen3.8-flash'>
+<datalist id='models'></datalist>
+<button class='sec' onclick='fetchModels()'>Fetch models</button>
+<label>Default engine <span class='hint'>(when caller omits engine)</span></label>
+<select id='engine'><option value='qwen'>API vision (qwen-compatible)</option><option value='tesseract'>Tesseract (local, free)</option></select>
+<label>Settings PIN <span class='hint'>(only if SETTINGS_PIN env is set)</span></label>
+<input id='pin' type='password'>
+<button onclick='testCfg()'>Test connection</button>
+<button onclick='saveCfg()'>Save</button> <button class='sec' onclick='saveCfg(true)' title='skip the connection test'>Force save</button>
+<pre id='out'></pre></div>
+<script>
+const $=id=>document.getElementById(id);
+function say(cls,msg){const o=$('out');o.className=cls;o.textContent=msg;}
+async function load(){
+  const c=await(await fetch('/settings/ocr')).json();
+  $('endpoint').value=c.endpoint||'';$('model').value=c.model||'';$('engine').value=c.engine||'qwen';
+  $('cur').textContent='current: model='+(c.model||'—')+' · key='+(c.key_masked||'(none)')+' · engine='+c.engine+(c.source==='file'?' (file)':' (env bootstrap)');
+}
+function body(){return {endpoint:$('endpoint').value,key:$('key').value,model:$('model').value,engine:$('engine').value,pin:$('pin').value};}
+async function fetchModels(){
+  say('mut','listing models…');
+  const r=await fetch('/settings/ocr/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});
+  const d=await r.json();
+  if(!r.ok)return say('err',d.detail||'failed');
+  $('models').innerHTML=(d.models||[]).map(m=>`<option value='${m}'>`).join('');
+  say('ok',(d.models||[]).length+' models — pick from the list');
+}
+async function testCfg(){
+  say('mut','testing (tiny vision request)…');
+  const r=await fetch('/settings/ocr/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});
+  const d=await r.json();
+  say(r.ok?'ok':'err',(r.ok?'✓ connection OK: ':'✗ ')+(d.result||d.detail||''));
+}
+async function saveCfg(force){
+  if(!force){say('mut','testing before save…');
+    const t=await fetch('/settings/ocr/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});
+    if(!t.ok){const e=await t.json();return say('err','test failed, NOT saved: '+(e.detail||''));}}
+  const b=body(); if(force)b.force=true;
+  const r=await fetch('/settings/ocr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  const d=await r.json();
+  say(r.ok?'ok':'err',(r.ok?'✓ saved & live: '+JSON.stringify(d.config):'✗ '+(d.detail||'')));
+  if(r.ok)load();
+}
+load();
+</script></body></html>"""
+
+
+@app.get("/view/settings", response_class=HTMLResponse)
+def view_settings():
+    return SETTINGS_HTML
+
+
+def _pin_ok(body):
+    pin = os.environ.get("SETTINGS_PIN", "")
+    return (not pin) or body.get("pin") == pin
+
+
+def _test_cfg(cfg):
+    """Tiny black PNG, expect an 'ok'-ish reply. Translates 401/404/timeouts."""
+    import urllib.error
+    if not cfg.get("key"):
+        raise HTTPException(400, "no API key (enter one, or leave the saved one in place)")
+    if not cfg.get("endpoint"):
+        raise HTTPException(400, "endpoint URL required")
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAKElEQVR4nGNgYGD4z4AGmNEF6IIRXQC3AgA1FwYBhyIPUQAAAABJRU5ErkJggg==")
+    try:
+        api_vision_ocr(png, {**cfg, "endpoint": normalize_chat_url(cfg["endpoint"])})
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as e:
+        hint = {401: "key rejected (401)", 403: "key forbidden (403)", 404: "model not available in this plan (404) — check the model name/plan", 429: "rate limited (429) — try again later"}.get(e.code, str(e.code))
+        raise HTTPException(502, f"endpoint said {hint}")
+    except Exception as e:
+        raise HTTPException(502, f"cannot reach endpoint: {type(e).__name__}: {str(e)[:120]}")
+    return "connection + model + key OK"
+
+
+@app.get("/settings/ocr")
+def get_settings():
+    cfg = load_ocr_config()
+    return {"endpoint": cfg["endpoint"], "model": cfg["model"], "engine": cfg["engine"],
+            "key_masked": mask_key(cfg["key"]), "key_set": bool(cfg["key"]),
+            "source": "file" if OCR_CONFIG_PATH.exists() else "env"}
+
+
+@app.post("/settings/ocr")
+async def post_settings(request: Request):
+    body = await request.json()
+    if not _pin_ok(body):
+        raise HTTPException(401, "wrong settings PIN")
+    key = (body.get("key") or "").strip() or load_ocr_config()["key"]
+    cfg = {"endpoint": body.get("endpoint", ""), "model": (body.get("model") or "").strip(),
+           "key": key, "engine": body.get("engine") or "qwen"}
+    if not cfg["model"]:
+        raise HTTPException(400, "model required")
+    if not normalize_chat_url(cfg["endpoint"]):
+        raise HTTPException(400, "endpoint URL required")
+    # D4 gate: server-side test unless explicit force override
+    if not body.get("force"):
+        _test_cfg({**cfg, "endpoint": normalize_chat_url(cfg["endpoint"])})
+    cfg = save_ocr_config(cfg)
+    return {"ok": True, "tested": bool(not body.get("force")),
+            "config": {"endpoint": cfg["endpoint"], "model": cfg["model"],
+            "engine": cfg["engine"], "key_masked": mask_key(cfg["key"])}}
+
+
+@app.post("/settings/ocr/test")
+async def post_test(request: Request):
+    body = await request.json()
+    cur = load_ocr_config()
+    cfg = {"endpoint": body.get("endpoint") or cur["endpoint"],
+           "model": (body.get("model") or "").strip() or cur["model"],
+           "key": (body.get("key") or "").strip() or cur["key"], "engine": "qwen"}
+    return {"ok": True, "result": _test_cfg(cfg)}
+
+
+@app.post("/settings/ocr/models")
+async def post_models(request: Request):
+    body = await request.json()
+    cur = load_ocr_config()
+    endpoint = normalize_chat_url(body.get("endpoint") or cur["endpoint"])
+    listing = endpoint[: -len("/chat/completions")] + "/models" if endpoint.endswith("/chat/completions") else None
+    if not listing:
+        raise HTTPException(400, "endpoint must be OpenAI-compatible (/v1) to list models")
+    key = (body.get("key") or "").strip() or cur["key"]
+    import urllib.error
+    req = urllib.request.Request(listing)
+    req.add_header("Authorization", "Bearer " + key)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(502, f"{e.code} from {listing}")
+    except Exception as e:
+        raise HTTPException(502, f"cannot reach: {str(e)[:120]}")
+    return {"models": sorted(m.get("id", "") for m in d.get("data", []) if m.get("id"))}
 
 
 @app.get("/view/{doc_id}", response_class=HTMLResponse)

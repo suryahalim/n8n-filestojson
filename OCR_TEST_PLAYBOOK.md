@@ -12,6 +12,7 @@ Current state: `INGEST_ALLOW_DUP=1` → **same file can be uploaded repeatedly, 
 | Receiving inbox (delivered JSON) | http://100.68.212.36:5000/view/inbox |
 | n8n UI / workflows | http://100.68.212.36:5678 |
 | Swagger API | http://100.68.212.36:5000/docs |
+| **OCR settings (key/model/endpoint)** | http://100.68.212.36:5000/view/settings |
 
 OCR trigger — not a Swagger endpoint; run it from n8n (Execute workflow) or curl:
 ```
