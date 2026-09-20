@@ -53,10 +53,11 @@ On a doc already DELIVERED via tesseract (from T2), run T3 step 3 again with `en
 ✅ Expect: text REPLACED (not appended), `ocr_engine` flips to `qwen3.8-flash`, new DELIVERED record in inbox (review_loop increments). Never both engines' text mixed.
 
 ## 5. T5 — Duplicates allowed (dedupe OFF) (1 min)
-1. Form → upload the SAME file 3× in one multi-select (or single upload 3×).
+1. Form → upload the SAME file 3× in one multi-select (or batch API 3×).
 2. ✅ Expect: **3 separate documents**, 3 distinct IDs — no `SKIPPED_DUPLICATE` anymore.
+   (Technical note: single `/documents` upload NEVER deduped — dupes always re-ingested. Dedupe only guarded the BATCH path via sha256; with `INGEST_ALLOW_DUP=1` even that guard is bypassed, so form/batch/API all accept dupes now.)
 3. `/view` shows all three rows independently; each can be OCR'd separately.
-🔁 This is the testing mode (`INGEST_ALLOW_DUP=1`). Production restores §7.
+🔁 This is the testing mode. Production restores §7.
 
 ## 6. T6 — Batch mixed upload (2 min)
 Form, multi-select ALL four fixtures at once.

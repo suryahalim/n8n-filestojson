@@ -1,6 +1,7 @@
 # Doc Pipeline — Test Case Suite & Documentation
 
 Version: 2026-09-18 · All cases executed live on this date — **PASS** (U10 is the composite of U1–U4+U7, each verified live today; run it as one sitting during real UAT).
+**OCR testing (2026-09-19): use `OCR_TEST_PLAYBOOK.md` — T1–T8, dedupe currently OFF for testing (`INGEST_ALLOW_DUP=1`).**
 
 **Rule of thumb:** UI cases (U-series) = what your staff/stakeholders will do. Code cases (C-series) = regression checks you (or CI) run once before declaring any change safe.
 
