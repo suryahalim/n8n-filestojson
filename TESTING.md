@@ -128,7 +128,11 @@ Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>",
 ### U12 · Same 19-pager through Qwen (engine=qwen) — PASS ✅ (2026-09-18)
 `{"document_id":"…","engine":"qwen"}` → n8n webhook → 19 pages, 29,835 chars, VALIDATED→DELIVERED in **425 s** (~22 s/page, sequential). Quality vs Tesseract: phone/fax digits clean (`(021) 4601849, 4600093`), dates exact (`22-Jul-2026`, `28-Jul-2026`), SO/CPO numbers (`2100115362`), salesman `AHMAD TAHJUDIN`, warehouse/zone codes. Company header partially garbled on the decorative logo area (`PT . . . ANA ABADI` — stamp/logo region), and doc has no literal `SO-` prefix (it's `Sales Order [SO] #`), so token assertions must match real content, not guesses. Re-OCR replaces previous engine text (bug fixed `7992d61`).
 
-## 6. Known gaps (be honest in UAT)
+## 6. Dedupe toggle (for testing)
+
+Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re-ingest but can be blocked by UI flows). To test with the SAME file repeatedly: set `INGEST_ALLOW_DUP=1` in `.env`, then `docker compose up -d extractor` — bypasses ALL dedupe (form/batch/single). Verified: same PDF 3× via batch + 1× via single = 4 separate documents. Return to `0` for production.
+
+## 7. Known gaps (be honest in UAT)
 
 1. ~~OCR human-in-the-loop~~ → Tesseract auto-OCR live (U11); Qwen engine live (U12, model=qwen3.8-flash via QWEN_MODEL env) — dedicated qwen-vl swap pending.
 2. **PDF tables arrive as line text**, not cell-structured rows (xlsx does have real rows/cols). (Planned: pdfplumber pass.)
@@ -136,7 +140,7 @@ Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>",
 4. Batch form = one doc_type/notes per submission (per-file metadata needs the API).
 5. `TARGET_API_URL` is still the mock until a real endpoint is set in compose.
 
-## 7. FAQ while testing
+## 8. FAQ while testing
 
 - Form won't open → Tailscale off. · Workflow edit ignored → must **Publish** (n8n top-right) — production runs the published version. · Payload empty in webhook → send FLAT JSON, never wrap in `{"body":...}`. · Task stuck QUEUED → worker down (`docker logs dp-worker`); sweeper self-heals within ~20 s if the bus message was missed. · n8n login loop → `N8N_SECURE_COOKIE=false` already set (USAGE §3.5).
 
