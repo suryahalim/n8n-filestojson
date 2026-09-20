@@ -30,7 +30,7 @@
           },
           "conditions": [
             {
-              "leftValue": "={{ $json.body.engine || 'tesseract' }}",
+              "leftValue": "={{ $json.body.engine || 'qwen' }}",
               "rightValue": "qwen",
               "operator": {
                 "type": "string",

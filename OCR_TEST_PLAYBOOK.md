@@ -18,7 +18,7 @@ OCR trigger — not a Swagger endpoint; run it from n8n (Execute workflow) or cu
 POST http://100.68.212.36:5678/webhook/ocr-scan
 {"document_id":"<id>","engine":"qwen"}
 ```
-(`"engine":"tesseract"` or omit → Tesseract; add `"lang":"ind"` for Indonesian.)
+(`"engine":"tesseract"` → Tesseract; omit → **Qwen (default since 2026-09-20)**. `"lang":"eng|ind"` only applies to Tesseract.)
 
 Fixtures (in `~/doc-pipeline/tests/fixtures/`, already sent to this chat):
 `PO-2026-8412.pdf` (text PDF) · `SCAN-delivery-note-DN-991.pdf` (flatbed scan, no text layer) · `SCAN-photo-DN-991.jpg` (handheld photo) · `IT-Asset-Register-PO-8412.xlsx`
@@ -90,6 +90,7 @@ While `INGEST_ALLOW_DUP=1`, the duplicate assertions inside test_batch_e2e (S7) 
 | --- | --- | --- |
 | `QWEN_MODEL` | qwen3.8-flash | swap to `qwen-vl-ocr` etc. — no code change |
 | `QWEN_API_KEY` | set | Token Plan key (never in n8n/repo) |
+| `OCR_ENGINE` | **qwen (default)** | fallback engine when caller omits `engine` — change to `tesseract` anytime |
 | `INGEST_ALLOW_DUP` | **1 (testing)** | 0 = dedupe sha256 ON for production |
 | `OCR_MAX_PAGES` | 30 | pages OCR'd per doc |
 

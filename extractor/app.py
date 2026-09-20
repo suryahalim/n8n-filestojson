@@ -307,6 +307,8 @@ async def correct_fields(doc_id: str, request: Request):
 
 OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
 OCR_DPI = os.environ.get("OCR_DPI", "200")
+# Default OCR engine when caller doesn't specify — env-changeable (qwen|tesseract).
+DEFAULT_OCR_ENGINE = os.environ.get("OCR_ENGINE", "qwen")
 QWEN_KEY = os.environ.get("QWEN_API_KEY", "")
 QWEN_URL = os.environ.get("QWEN_URL",
     "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions")
@@ -339,9 +341,11 @@ def _tesseract(png_path: str, lang: str = "eng") -> str:
 
 
 @app.post("/documents/{doc_id}/ocr")
-def run_ocr(doc_id: str, lang: str = "eng", engine: str = "tesseract"):
-    """Option 1 (Tesseract): OCR the STORED original (pdf-scan or image),
-    merge into standard_json, re-validate; on pass publish delivery like /correct."""
+def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
+    """OCR the STORED original (pdf-scan or image), merge into standard_json,
+    re-validate; on pass publish delivery like /correct.
+    engine: 'qwen' (default, API — qwen3.8-flash via QWEN_MODEL) or 'tesseract' (local)."""
+    engine = engine or DEFAULT_OCR_ENGINE
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
         d = cur.fetchone()

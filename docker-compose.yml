@@ -83,6 +83,7 @@ services:
       - RABBIT_USER=${RABBITMQ_USER}
       - RABBIT_PASS=${RABBITMQ_PASS}
       - QWEN_API_KEY=${QWEN_API_KEY}
+      - OCR_ENGINE=${OCR_ENGINE:-qwen}
       - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
