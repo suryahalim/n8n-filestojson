@@ -13,7 +13,7 @@ Current state: `INGEST_ALLOW_DUP=1` → **same file can be uploaded repeatedly, 
 | n8n UI / workflows | http://100.68.212.36:5678 |
 | Swagger API | http://100.68.212.36:5000/docs |
 
-OCR trigger (after copy-paste into Swagger `POST /webhook/ocr-scan` is NOT here — use n8n execute or curl to n8n):
+OCR trigger — not a Swagger endpoint; run it from n8n (Execute workflow) or curl:
 ```
 POST http://100.68.212.36:5678/webhook/ocr-scan
 {"document_id":"<id>","engine":"qwen"}
