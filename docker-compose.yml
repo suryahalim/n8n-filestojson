@@ -86,6 +86,7 @@ services:
       - OCR_ENGINE=${OCR_ENGINE:-qwen}
       - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
       - OCR_AUTO=${OCR_AUTO:-1}
+      - MAP_AUTO=${MAP_AUTO:-1}
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving

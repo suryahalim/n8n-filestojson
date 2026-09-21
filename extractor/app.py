@@ -444,6 +444,97 @@ def _tesseract(png_path: str, lang: str = "eng") -> str:
     return r.stdout
 
 
+
+# ---------------- structured table mapping (invoice normalization) ----------------
+INVOICE_MAP_PROMPT = """Anda mesin ekstraksi data invoice untuk dokumen vendor Indonesia (cetakan, scan, foto, tulisan tangan; banyak vendor; kualitas campuran).
+Dari TEKS di bawah, hasilkan SATU objek JSON sesuai skema persis ini:
+{"vendor": {"name": "", "npwp": "", "address": ""},
+ "invoice": {"number": "", "number_source": "printed|handwritten|stamp|inferred|null", "number_confidence": "high|medium|low", "date": "YYYY-MM-DD atau null", "ref_po": "", "doc_type_label": "mis. FAKTUR PAJAK/INVOICE/DELIVERY ORDER"},
+ "amounts": {"currency": "IDR", "subtotal": null, "tax": null, "total": null, "as_written": "nilai total persis seperti tertulis"},
+ "line_items": [{"description": "", "code": "", "qty": null, "uom": "", "unit_price": null, "amount": null, "page": null}],
+ "handwritten": [{"content": "transkripsi verbatim", "interpreted": "makna jika jelas (tanggal, nopol, tanda tangan, LUNAS, paraf)", "page": null}],
+ "payments": {"bank": "", "account": "", "account_name": ""},
+ "confidence": "high|medium|low", "missing": ["field yang tidak ditemukan"], "notes": "hal yang meragukan + alasan pilihan angka ambigu"}
+ATURAN:
+- Rupiah: "Rp 1.234.567,89" -> 1234567.89 (titik=ribuan, koma=desimal). Jika ambigu, pilih yang masuk akal secara pembukuan lalu turunkan confidence dan tulis di notes.
+- Nomor invoice bisa di mana saja: header (No./Faktur/Invoice), cap/stempel, coretan/lingkaran, tulisan tangan. Jika tidak eksplisit -> null dan daftarkan "invoice_number" di missing; JANGAN mengarang.
+- SEMUA konten tulisan tangan wajib masuk handwritten, meskipun juga ada di teks cetak.
+- amounts berupa angka murni tanpa Rp/titik/koma. field string kosong pakai null.
+- BATASI OUTPUT: line_items maksimal 10 baris paling penting; jika lebih, tulis total baris + agregat
+  (mis. qty gabungan) di notes dan ringkas sisanya SATU baris "lain-lain". handwritten maksimal 15.
+- Dokumen multi-halaman: fokus halaman header invoice & total; lampiran cukup diringkas.
+Keluarkan HANYA JSON, tanpa markdown, tanpa penjelasan."""
+
+
+def llm_text(prompt: str, cfg) -> str:
+    import urllib.request as ur
+    body = json.dumps({"model": cfg["model"], "max_tokens": 4000,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = ur.Request(cfg["endpoint"], data=body, method="POST")
+    req.add_header("Authorization", "Bearer " + cfg["key"])
+    req.add_header("Content-Type", "application/json")
+    with ur.urlopen(req, timeout=int(os.environ.get("MAP_TIMEOUT", "600"))) as r:
+        d = json.load(r)
+    t = d["choices"][0]["message"]["content"]
+    if isinstance(t, list):
+        t = "\n".join(x.get("text", "") for x in t)
+    return t or ""
+
+
+def _parse_json_loose(txt: str):
+    txt = txt.strip()
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        txt = txt[txt.find("{"):]
+    try:
+        return json.loads(txt)
+    except Exception:
+        i, j = txt.find("{"), txt.rfind("}")
+        if i >= 0 and j > i:
+            return json.loads(txt[i:j + 1])
+        raise
+
+
+def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
+    """LLM-normalize extracted/OCR'd text into the structured vendor table row."""
+    cfg = load_ocr_config()
+    if not cfg.get("key"):
+        raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
+    if std.get("kind") == "pdf":
+        text = "\n".join(f"--- HALAMAN {p.get('page')} ---\n{p.get('text', '')}"
+                          for p in std.get("pages", []))
+    else:
+        text = std.get("ocr") or std.get("text") or ""
+    if len(text.strip()) < 10:
+        raise HTTPException(422, "nothing to map: document text still empty — run OCR first (engine=qwen)")
+    prompt = INVOICE_MAP_PROMPT + "\n\n=== TEKS DOKUMEN ===\n" + text[:28000]
+    raw = llm_text(prompt, cfg)
+    out = _parse_json_loose(raw)
+    out["_mapper"] = {"model": cfg["model"], "source_chars": len(text)}
+    return out
+
+
+@app.post("/documents/{doc_id}/map")
+async def map_doc(doc_id: str, request: Request):
+    """Map a document's text into the structured invoice table row (manual/other types)."""
+    kind = "invoice"
+    try:
+        kind = ((await request.json()) or {}).get("doc_type", "invoice") or "invoice"
+    except Exception:
+        pass
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT standard_json FROM documents WHERE id=%s", (doc_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "document not found")
+        std = dict(row["standard_json"] or {})
+        mapped = map_std_to_table(std, kind)
+        std["mapped"] = mapped
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
+                    (json.dumps(std), doc_id))
+    return {"document_id": doc_id, "mapped": mapped}
+
+
 @app.post("/documents/{doc_id}/ocr")
 def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
     """OCR the STORED original (pdf-scan or image), merge into standard_json,
@@ -521,6 +612,14 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         else:
             std["ocr"] = pages_text[0]["text"]
 
+        # Auto-map: invoice docs get the normalized vendor-table row as part of OCR.
+        if os.environ.get("MAP_AUTO", "1") == "1" and (std.get("doc_type") or "").lower() == "invoice":
+            try:
+                std["mapped"] = map_std_to_table(std)
+                print("AUTO-MAP", doc_id[:8], "ok conf:", std["mapped"].get("confidence"), flush=True)
+            except Exception as e:
+                std["mapped"] = {"error": str(e)[:300]}
+                print("AUTO-MAP", doc_id[:8], "FAILED:", str(e)[:200], flush=True)
         env = {"schema_version": std.get("schema_version", "1.0"), "document_id": doc_id,
                "filename": d["filename"], "sha256": d["sha256"], "extracted": std}
         ok, flags = validate(env)
@@ -630,6 +729,40 @@ def _render_std(std):
         out.append(f"<h2>Page {p.get('page')}</h2><pre>{H.escape(p.get('text') or '(no text)')}</pre>")
     if std.get("ocr"):
         out.append(f"<h2>OCR</h2><pre>{H.escape(str(std['ocr']))}</pre>")
+    m = std.get("mapped")
+    if isinstance(m, dict) and m and not m.get("error"):
+        esc = lambda v: H.escape(str(v)) if v not in (None, "") else "—"
+        out.append("<h2>Mapped invoice row</h2>")
+        out.append("<table><tr>" + "".join(f"<th>{c}</th>" for c in
+                   ("Vendor","NPWP","Alamat","Invoice No","Sumber no.","Conf. no.","Date","Ref PO","Subtotal","PPN/Tax","Total","As written","Confidence")) + "</tr><tr>")
+        ven, inv, amt = (m.get("vendor") or {}), (m.get("invoice") or {}), (m.get("amounts") or {})
+        for c in (ven.get("name"), ven.get("npwp"), ven.get("address"), inv.get("number"),
+                  inv.get("number_source"), inv.get("number_confidence"), inv.get("date"), inv.get("ref_po"),
+                  amt.get("subtotal"), amt.get("tax"), amt.get("total"), amt.get("as_written"), m.get("confidence")):
+            out.append(f"<td>{esc(c)}</td>")
+        out.append("</tr></table>")
+        li = m.get("line_items") or []
+        if li:
+            out.append(f"<h2>Line items ({len(li)})</h2><table><tr>" + "".join(f"<th>{c}</th>" for c in
+                       ("Code","Description","Qty","UoM","Unit price","Amount","Pg")) + "</tr>")
+            for x in li:
+                out.append("<tr>" + "".join(f"<td>{esc(x.get(k))}</td>" for k in
+                           ("code","description","qty","uom","unit_price","amount","page")) + "</tr>")
+            out.append("</table>")
+        hw = m.get("handwritten") or []
+        if hw:
+            out.append(f"<h2>Handwritten ({len(hw)})</h2><table><tr><th>Transcription</th><th>Interpretation</th><th>Pg</th></tr>")
+            for x in hw:
+                out.append(f"<tr><td>{esc(x.get('content'))}</td><td>{esc(x.get('interpreted'))}</td><td>{esc(x.get('page'))}</td></tr>")
+            out.append("</table>")
+        pay = m.get("payments") or {}
+        if any(pay.values()):
+            out.append("<h2>Payment</h2><div class='sub'>Bank: " + esc(pay.get("bank")) + " · Rek: "
+                       + esc(pay.get("account")) + " a.n. " + esc(pay.get("account_name")) + "</div>")
+        if m.get("missing"):
+            out.append("<div class='sub'>missing: " + esc(", ".join(map(str, m["missing"]))) + "</div>")
+        if m.get("notes"):
+            out.append("<div class='sub'>notes: " + esc(m["notes"]) + "</div>")
     out.append("<h2>Raw standard JSON</h2><pre>" + H.escape(json.dumps(std, indent=2, default=str)) + "</pre>")
     return "".join(out)
 
