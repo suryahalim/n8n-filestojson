@@ -13,7 +13,7 @@ log = logging.getLogger("extractor")
 from pathlib import Path
 import psycopg2, psycopg2.extras
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response
 import pika
 
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
@@ -501,17 +501,59 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
     if not cfg.get("key"):
         raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
     if std.get("kind") == "pdf":
-        text = "\n".join(f"--- HALAMAN {p.get('page')} ---\n{p.get('text', '')}"
-                          for p in std.get("pages", []))
+        pages = std.get("pages", [])
+        # Multi-page invoices: model generation, not reading, is the bottleneck.
+        # Keep header pages (1-2) + last page (grand total); summarize the middle.
+        if len(pages) > 3:
+            keep = pages[:2] + pages[-1:]
+            text = "\n".join(f"--- HALAMAN {p.get('page')} ---\n{p.get('text', '')}" for p in keep)
+            text = (f"[DOKUMEN {len(pages)} HALAMAN: halaman 1-2 & terakhir dikirim lengkap; "
+                    f"halaman {3}-{len(pages)-1} diringkas 300 karakter pertama per halaman.]\n"
+                    + "\n".join(f"--- HALAMAN {p.get('page')} (ringkas) ---\n{(p.get('text') or '')[:300]}"
+                                 for p in pages[2:-1]) + "\n\n" + text)
+        else:
+            text = "\n".join(f"--- HALAMAN {p.get('page')} ---\n{p.get('text', '')}" for p in pages)
     else:
         text = std.get("ocr") or std.get("text") or ""
     if len(text.strip()) < 10:
         raise HTTPException(422, "nothing to map: document text still empty — run OCR first (engine=qwen)")
-    prompt = INVOICE_MAP_PROMPT + "\n\n=== TEKS DOKUMEN ===\n" + text[:28000]
+    prompt = INVOICE_MAP_PROMPT + "\n\n=== TEKS DOKUMEN ===\n" + text[:14000]
     raw = llm_text(prompt, cfg)
     out = _parse_json_loose(raw)
     out["_mapper"] = {"model": cfg["model"], "source_chars": len(text)}
     return out
+
+
+@app.get("/documents/{doc_id}/mapped.csv")
+def mapped_csv(doc_id: str):
+    """One CSV row per mapped document — drop straight into the vendor invoice table."""
+    import csv as _csv
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT standard_json, filename FROM documents WHERE id=%s", (doc_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, "document not found")
+    m = (row["standard_json"] or {}).get("mapped") or {}
+    if m.get("error") or not m:
+        raise HTTPException(422, "no mapping yet — POST /documents/{}/map or OCR with doc_type=invoice")
+    inv, ven, amt = m.get("invoice") or {}, m.get("vendor") or {}, m.get("amounts") or {}
+    cols = ["filename","document_id","vendor_name","vendor_npwp","vendor_address","invoice_number",
+            "invoice_number_source","invoice_number_confidence","invoice_date","ref_po","doc_type_label",
+            "subtotal","tax","total","as_written","line_item_count","handwritten_count",
+            "confidence","missing","notes"]
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(cols)
+    hw = m.get("handwritten") or []
+    li = m.get("line_items") or []
+    w.writerow([row["filename"], doc_id, ven.get("name"), ven.get("npwp"), ven.get("address"),
+                inv.get("number"), inv.get("number_source"), inv.get("number_confidence"),
+                inv.get("date"), inv.get("ref_po"), inv.get("doc_type_label"),
+                amt.get("subtotal"), amt.get("tax"), amt.get("total"), amt.get("as_written"),
+                len(li), len(hw), m.get("confidence"),
+                ";".join(m.get("missing") or []), (m.get("notes") or "").replace("\n", " ")[:400]])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename=mapped_{doc_id[:8]}.csv"})
 
 
 @app.post("/documents/{doc_id}/map")
