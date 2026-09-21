@@ -345,13 +345,13 @@ async def upload_batch(request: Request):
     # from settings), sequential background thread. OCR_AUTO=0 disables.
     if os.environ.get("OCR_AUTO", "1") == "1" and "auto_ocr" not in body:
         flagged = [r["document_id"] for r in results if r.get("status") == "FLAGGED"]
+        validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
         if flagged:
             _auto_ocr_bg(flagged)
-            validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
-            if validated and os.environ.get("MAP_AUTO", "1") == "1":
-                _auto_map_bg(validated)
+        if validated and os.environ.get("MAP_AUTO", "1") == "1":
+            _auto_map_bg(validated)
         return {"batch": True, "total": len(results), "summary": counts,
-                "auto_ocr_started": len(flagged), "results": results}
+                "auto_ocr_started": len(flagged), "auto_map_started": len(validated), "results": results}
     return {"batch": True, "total": len(results), "summary": counts, "results": results}
 
 
