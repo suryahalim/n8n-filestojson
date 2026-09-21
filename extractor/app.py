@@ -234,6 +234,38 @@ async def upload(request: Request,
     return await ingest_one(raw, file.filename, file.content_type or "", doc_type, notes)
 
 
+def _auto_map_bg(doc_ids):
+    """Digital PDFs (text layer OK -> VALIDATED, skip OCR) still deserve the map:
+    classify -> (full map if money_doc | light profile) -> ledger. Runs in bg thread."""
+    def worker():
+        for did in doc_ids:
+            try:
+                with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT filename, standard_json FROM documents WHERE id=%s", (did,))
+                    row = cur.fetchone()
+                if not row:
+                    continue
+                std = dict(row["standard_json"] or {})
+                if std.get("mapped") or std.get("classified"):
+                    continue
+                classify_and_route(did, std, row["filename"],
+                                   explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
+                with db() as c, c.cursor() as cur:
+                    cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
+                                (json.dumps(std), did))
+                if std.get("mapped"):
+                    try:
+                        upsert_invoice_row(did, row["filename"], std)
+                    except Exception as ue:
+                        print("LEDGER upsert (digital) failed:", str(ue)[:150], flush=True)
+                print("AUTO-MAP(digital)", did[:8], "->",
+                      (std.get("classified") or {}).get("class"),
+                      "mapped" if std.get("mapped") else "profile", flush=True)
+            except Exception as e:
+                print("AUTO-MAP(digital)", did[:8], "FAILED:", str(e)[:200], flush=True)
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def _auto_ocr_bg(doc_ids):
     """Option: auto-OCR (default engine) for flagged docs, sequential background thread.
     Triggered right after /documents/batch when OCR_AUTO=1. n8n OCR workflow not required."""
@@ -307,6 +339,9 @@ async def upload_batch(request: Request):
         flagged = [r["document_id"] for r in results if r.get("status") == "FLAGGED"]
         if flagged:
             _auto_ocr_bg(flagged)
+            validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
+            if validated and os.environ.get("MAP_AUTO", "1") == "1":
+                _auto_map_bg(validated)
         return {"batch": True, "total": len(results), "summary": counts,
                 "auto_ocr_started": len(flagged), "results": results}
     return {"batch": True, "total": len(results), "summary": counts, "results": results}
@@ -466,9 +501,9 @@ ATURAN:
 Keluarkan HANYA JSON, tanpa markdown, tanpa penjelasan."""
 
 
-def llm_text(prompt: str, cfg) -> str:
+def llm_text(prompt: str, cfg, max_tokens: int = 4000) -> str:
     import urllib.request as ur
-    body = json.dumps({"model": cfg["model"], "max_tokens": 4000,
+    body = json.dumps({"model": cfg["model"], "max_tokens": max_tokens,
                        "messages": [{"role": "user", "content": prompt}]}).encode()
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
@@ -493,6 +528,86 @@ def _parse_json_loose(txt: str):
         if i >= 0 and j > i:
             return json.loads(txt[i:j + 1])
         raise
+
+
+CLASSIFY_PROMPT = """Anda pengklasifikasi dokumen bisnis Indonesia. Dari potongan teks + nama file, tentukan:
+{
+ "class": "invoice|faktur_penjualan|faktur_pajak|delivery_order|sales_order|purchase_order|surat_jalan|kwitansi|bon_transfer|kontrak|moU|surat_resmi|nota_retil|struk|laporan|proposal|lainnya",
+ "money_doc": true/false,   // mengandung tagihan/nilai uang yang perlu masuk ledger penagihan
+ "confidence": "high|medium|low",
+ "title": "judul/label persis pada dokumen (max 80 char)",
+ "number": "nomor dokumen (surat/DO/SO/PO/faktur) atau null",
+ "date": "YYYY-MM-DD atau null",
+ "issuer": "pihak penerbit/di kiri atas atau null",
+ "recipient": "penerima addressed-to atau null",
+ "amount": angka rupiah murni atau null,
+ "notes": "1 kalimat: dasar klasifikasi; hal penting bila money_doc=false"
+}
+Aturan: FAKTUR PENJUALAN/DELIVERY ORDER yang berisi barang+qty TERBIT PENJUAL = money_doc true (nanti di-map penuh).
+Bukti transfer/kwitansi = money_doc true. Kontrak/surat jalan tanpa harga/proposal/laporan = false.
+Jangan mengarang; null lebih baik. HANYA JSON."""
+
+def classify_document(std: dict, filename: str = "") -> dict:
+    """One small, cheap LLM call: what kind of document is this?"""
+    if std.get("kind") == "pdf":
+        pages = std.get("pages") or []
+        text = "\n".join((p.get("text") or "") for p in pages[:2])
+        if len(pages) > 2:
+            text += "\n...\n" + (pages[-1].get("text") or "")
+    else:
+        text = std.get("ocr") or std.get("text") or ""
+    if not text.strip():
+        return {"class": "lainnya", "money_doc": False, "confidence": "low", "error": "no text to classify"}
+    prompt = CLASSIFY_PROMPT + f"\n\nNAMA FILE: {filename}\n\n=== POTONGAN TEKS ===\n" + text[:2500]
+    raw = llm_text(prompt, load_ocr_config(), max_tokens=500)
+    out = raw.strip()
+    if out.startswith("```"):
+        out = out.split("```")[1].strip().lstrip("json").strip()
+    try:
+        c = json.loads(out)
+    except Exception:
+        raise HTTPException(502, "classifier output not JSON: " + out[:200])
+    c["_classifier"] = {"model": load_ocr_config().get("model"), "source_chars": len(text)}
+    c.setdefault("money_doc", False)
+    return c
+
+
+def profile_to_row(doc_id: str, filename: str, cls: dict):
+    """Non-money document -> one light ledger row (identity only)."""
+    sql = """INSERT INTO invoice_rows (document_id, filename, vendor_name, doc_type_label, invoice_number,
+        invoice_date, currency, total, notes, confidence, mapper_model, doc_class, money_doc, status)
+        VALUES (%s,%s,%s,%s,%s,NULLIF(%s,'')::date,NULL,NULLIF(%s,'')::numeric,%s,%s,%s,%s,false,'extracted')
+        ON CONFLICT (document_id) DO UPDATE SET
+          filename=EXCLUDED.filename, vendor_name=EXCLUDED.vendor_name, doc_type_label=EXCLUDED.doc_type_label,
+          invoice_number=EXCLUDED.invoice_number, invoice_date=EXCLUDED.invoice_date, total=EXCLUDED.total,
+          notes=EXCLUDED.notes, confidence=EXCLUDED.confidence, mapper_model=EXCLUDED.mapper_model,
+          doc_class=EXCLUDED.doc_class, money_doc=false, updated_at=now()"""
+    vals = (doc_id, filename, cls.get("issuer"), cls.get("title"), cls.get("number"),
+            cls.get("date"), (cls.get("amount") if str(cls.get("amount") or "").strip() else None),
+            ("penerima: %s. " % cls.get("recipient") if cls.get("recipient") else "") + (cls.get("notes") or "")[:400],
+            cls.get("confidence"), (cls.get("_classifier") or {}).get("model"), cls.get("class"))
+    with db() as c, c.cursor() as cur:
+        cur.execute(sql, vals)
+
+
+def classify_and_route(doc_id: str, std: dict, filename: str, explicit_invoice: bool = False):
+    """MAP_AUTO router: classify anything -> money docs full-map, others light-profile."""
+    if explicit_invoice:
+        std["mapped"] = map_std_to_table(std)
+        std["classified"] = {"class": (std["mapped"].get("invoice") or {}).get("doc_type_label") or "invoice",
+                             "money_doc": True, "forced_by": "doc_type=invoice"}
+        return
+    cls = classify_document(std, filename)
+    std["classified"] = cls
+    if cls.get("money_doc"):
+        std["mapped"] = map_std_to_table(std)
+    else:
+        try:
+            profile_to_row(doc_id, filename, cls)
+            print("PROFILE-ROW", doc_id[:8], cls.get("class"), flush=True)
+        except Exception as pe:
+            print("PROFILE-ROW failed:", str(pe)[:150], flush=True)
+
 
 
 def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
@@ -539,32 +654,34 @@ def upsert_invoice_row(doc_id, filename, std):
         return None
     inv, ven, amt = m.get("invoice") or {}, m.get("vendor") or {}, m.get("amounts") or {}
     def _num(v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
         try:
-            return float(v) if v is not None else None
+            return float(str(v).replace(",", ""))
         except Exception:
             return None
-    sql = """INSERT INTO invoice_rows (document_id, filename, vendor_name, vendor_npwp, vendor_address,
-        doc_type_label, invoice_number, invoice_number_source, invoice_number_confidence, invoice_date,
-        ref_po, currency, subtotal, tax, total, total_as_written, line_items, handwritten, confidence,
-        missing, notes, mapper_model, mapped_at, status, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,now(),'extracted',now())
-        ON CONFLICT (document_id) DO UPDATE SET
-          filename=EXCLUDED.filename, vendor_name=EXCLUDED.vendor_name, vendor_npwp=EXCLUDED.vendor_npwp,
-          vendor_address=EXCLUDED.vendor_address, doc_type_label=EXCLUDED.doc_type_label,
-          invoice_number=EXCLUDED.invoice_number, invoice_number_source=EXCLUDED.invoice_number_source,
-          invoice_number_confidence=EXCLUDED.invoice_number_confidence, invoice_date=EXCLUDED.invoice_date,
-          ref_po=EXCLUDED.ref_po, currency=EXCLUDED.currency, subtotal=EXCLUDED.subtotal, tax=EXCLUDED.tax,
-          total=EXCLUDED.total, total_as_written=EXCLUDED.total_as_written, line_items=EXCLUDED.line_items,
-          handwritten=EXCLUDED.handwritten, confidence=EXCLUDED.confidence, missing=EXCLUDED.missing,
-          notes=EXCLUDED.notes, mapper_model=EXCLUDED.mapper_model, mapped_at=now(), updated_at=now()"""
+    cols = ["document_id","filename","vendor_name","vendor_npwp","vendor_address","doc_type_label",
+            "invoice_number","invoice_number_source","invoice_number_confidence","invoice_date",
+            "ref_po","currency","subtotal","tax","total","total_as_written","line_items","handwritten",
+            "confidence","missing","notes","mapper_model","doc_class"]
     vals = (doc_id, filename, ven.get("name"), ven.get("npwp"), ven.get("address"),
             inv.get("doc_type_label"), inv.get("number"), inv.get("number_source"),
-            inv.get("number_confidence"), inv.get("date"), inv.get("ref_po"),
-            amt.get("currency") or "IDR", _num(amt.get("subtotal")), _num(amt.get("tax")),
-            _num(amt.get("total")), amt.get("as_written"),
+            inv.get("number_confidence"), inv.get("date"),
+            inv.get("ref_po"), amt.get("currency") or "IDR",
+            _num(amt.get("subtotal")), _num(amt.get("tax")), _num(amt.get("total")), amt.get("as_written"),
             json.dumps(m.get("line_items") or []), json.dumps(m.get("handwritten") or []),
             m.get("confidence"), ";".join(m.get("missing") or []), (m.get("notes") or "")[:1000],
-            (m.get("_mapper") or {}).get("model"))
+            (m.get("_mapper") or {}).get("model"),
+            (std.get("classified") or {}).get("class") or inv.get("doc_type_label"))
+    ph = ["%s"] * len(cols)
+    ph[9] = "NULLIF(%s,'')::date"       # invoice_date
+    # subtotal/tax/total already coerced to float-or-None by _num — bind directly
+    ph[16] = "%s::jsonb"; ph[17] = "%s::jsonb"
+    upd = [f"{c}=EXCLUDED.{c}" for c in cols if c != "document_id"]
+    sql = (f"INSERT INTO invoice_rows ({', '.join(cols)}, mapped_at, status, money_doc, updated_at) "
+           f"VALUES ({', '.join(ph)}, now(), 'extracted', true, now()) "
+           f"ON CONFLICT (document_id) DO UPDATE SET {', '.join(upd)}, money_doc=true, mapped_at=now(), updated_at=now()")
+    assert len(vals) == len(cols), f"cols {len(cols)} vs vals {len(vals)}"
     with db() as c, c.cursor() as cur:
         cur.execute(sql, vals)
     return True
@@ -761,14 +878,18 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
             std["ocr"] = pages_text[0]["text"]
 
         # Auto-map: invoice docs get the normalized vendor-table row as part of OCR.
-        if os.environ.get("MAP_AUTO", "1") == "1" and (std.get("doc_type") or "").lower() == "invoice":
+        if os.environ.get("MAP_AUTO", "1") == "1":
             try:
-                std["mapped"] = map_std_to_table(std)
-                try:
-                    upsert_invoice_row(doc_id, d["filename"], std)
-                except Exception as ue:
-                    print("LEDGER upsert failed:", str(ue)[:150], flush=True)
-                print("AUTO-MAP", doc_id[:8], "ok conf:", std["mapped"].get("confidence"), flush=True)
+                classify_and_route(doc_id, std, d["filename"],
+                                   explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
+                if std.get("mapped"):
+                    try:
+                        upsert_invoice_row(doc_id, d["filename"], std)
+                    except Exception as ue:
+                        print("LEDGER upsert failed:", str(ue)[:150], flush=True)
+                    print("AUTO-MAP", doc_id[:8], "ok conf:", std["mapped"].get("confidence"), flush=True)
+                else:
+                    print("AUTO-CLASSIFY", doc_id[:8], "->", (std.get("classified") or {}).get("class"), "(non-money)", flush=True)
             except Exception as e:
                 std["mapped"] = {"error": str(e)[:300]}
                 print("AUTO-MAP", doc_id[:8], "FAILED:", str(e)[:200], flush=True)

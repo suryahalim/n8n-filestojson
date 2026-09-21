@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS invoice_rows (
   rpa_date               DATE,
   rpa_total              NUMERIC(16,2),
   rpa_note               TEXT,
+  doc_class              TEXT,
+  money_doc              BOOLEAN DEFAULT true,
   rpa_status             TEXT,          -- ok|corrected|rejected
   rpa_reviewed_at        TIMESTAMPTZ,
   created_at             TIMESTAMPTZ DEFAULT now(),
