@@ -524,6 +524,132 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
     return out
 
 
+# ---- invoice_rows: standard vendor-invoice ledger (v1.5) ----------------------
+INVOICE_ROWS_DDL = """CREATE TABLE IF NOT EXISTS invoice_rows (
+  id BIGSERIAL PRIMARY KEY,
+  document_id TEXT NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+  filename TEXT, vendor_name TEXT, vendor_npwp TEXT, vendor_address TEXT,
+  doc_type_label TEXT, invoice_number TEXT, invoice_number_source TEXT,
+  invoice_number_confidence TEXT, invoice_date DATE, ref_po TEXT,
+  currency TEXT DEFAULT 'IDR', subtotal NUMERIC(16,2), tax NUMERIC(16,2),
+  total NUMERIC(16,2), total_as_written TEXT,
+  line_items JSONB DEFAULT '[]'::jsonb, handwritten JSONB DEFAULT '[]'::jsonb,
+  confidence TEXT, missing TEXT, notes TEXT, mapper_model TEXT,
+  mapped_at TIMESTAMPTZ DEFAULT now(),
+  status TEXT NOT NULL DEFAULT 'extracted',
+  rpa_vendor TEXT, rpa_invoice_number TEXT, rpa_date DATE, rpa_total NUMERIC(16,2),
+  rpa_note TEXT, rpa_status TEXT, rpa_reviewed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS invoice_rows_status_idx ON invoice_rows (status, invoice_date);"""
+
+def ensure_invoice_rows_table():
+    try:
+        with db() as c, c.cursor() as cur:
+            cur.execute(INVOICE_ROWS_DDL)
+        return True
+    except Exception as e:
+        print("invoice_rows DDL skipped:", str(e)[:120], flush=True)
+        return False
+
+
+ensure_invoice_rows_table()
+
+
+def upsert_invoice_row(doc_id, filename, std):
+    """After auto-map: write/refresh the standard ledger row (keeps review columns
+    when re-extracting an existing doc)."""
+    m = std.get("mapped") or {}
+    if not m or m.get("error"):
+        return None
+    inv, ven, amt = m.get("invoice") or {}, m.get("vendor") or {}, m.get("amounts") or {}
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except Exception:
+            return None
+    sql = """INSERT INTO invoice_rows (document_id, filename, vendor_name, vendor_npwp, vendor_address,
+        doc_type_label, invoice_number, invoice_number_source, invoice_number_confidence, invoice_date,
+        ref_po, currency, subtotal, tax, total, total_as_written, line_items, handwritten, confidence,
+        missing, notes, mapper_model, mapped_at, status, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NULLIF(%s,'')::date,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,now(),'extracted',now())
+        ON CONFLICT (document_id) DO UPDATE SET
+          filename=EXCLUDED.filename, vendor_name=EXCLUDED.vendor_name, vendor_npwp=EXCLUDED.vendor_npwp,
+          vendor_address=EXCLUDED.vendor_address, doc_type_label=EXCLUDED.doc_type_label,
+          invoice_number=EXCLUDED.invoice_number, invoice_number_source=EXCLUDED.invoice_number_source,
+          invoice_number_confidence=EXCLUDED.invoice_number_confidence, invoice_date=EXCLUDED.invoice_date,
+          ref_po=EXCLUDED.ref_po, currency=EXCLUDED.currency, subtotal=EXCLUDED.subtotal, tax=EXCLUDED.tax,
+          total=EXCLUDED.total, total_as_written=EXCLUDED.total_as_written, line_items=EXCLUDED.line_items,
+          handwritten=EXCLUDED.handwritten, confidence=EXCLUDED.confidence, missing=EXCLUDED.missing,
+          notes=EXCLUDED.notes, mapper_model=EXCLUDED.mapper_model, mapped_at=now(), updated_at=now()"""
+    vals = (doc_id, filename, ven.get("name"), ven.get("npwp"), ven.get("address"),
+            inv.get("doc_type_label"), inv.get("number"), inv.get("number_source"),
+            inv.get("number_confidence"), inv.get("date"), inv.get("ref_po"),
+            amt.get("currency") or "IDR", _num(amt.get("subtotal")), _num(amt.get("tax")),
+            _num(amt.get("total")), amt.get("as_written"),
+            json.dumps(m.get("line_items") or []), json.dumps(m.get("handwritten") or []),
+            m.get("confidence"), ";".join(m.get("missing") or []), (m.get("notes") or "")[:1000],
+            (m.get("_mapper") or {}).get("model"))
+    with db() as c, c.cursor() as cur:
+        cur.execute(sql, vals)
+    return True
+
+
+@app.get("/invoices")
+def list_invoices(status: str = "", limit: int = 200):
+    """Standard vendor-invoice table — RPA pulls here (e.g. ?status=extracted)."""
+    lim = min(max(1, limit), 1000)
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if status:
+            cur.execute("SELECT * FROM invoice_rows WHERE status=%s ORDER BY invoice_date NULLS LAST, id DESC LIMIT %s", (status, lim))
+        else:
+            cur.execute("SELECT * FROM invoice_rows ORDER BY id DESC LIMIT %s", (lim,))
+        rows = [dict(r) for r in cur.fetchall()]
+    return {"count": len(rows), "rows": rows}
+
+
+@app.get("/invoices/export.csv")
+def invoices_csv(status: str = ""):
+    import csv as _csv
+    cols = ["document_id","filename","vendor_name","vendor_npwp","invoice_number","invoice_number_source",
+            "invoice_date","ref_po","doc_type_label","currency","subtotal","tax","total","total_as_written",
+            "confidence","missing","rpa_vendor","rpa_invoice_number","rpa_date","rpa_total","rpa_status","rpa_note",
+            "status","mapped_at"]
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM invoice_rows" + (" WHERE status=%s" % status if status else "") + " ORDER BY id")
+        rows = [dict(r) for r in cur.fetchall()]
+    buf = io.StringIO()
+    w = _csv.writer(buf); w.writerow(cols)
+    for r in rows:
+        w.writerow([r.get(k) for k in cols])
+    return Response(content=buf.getvalue(), media_type="text/csv")
+
+
+@app.patch("/invoices/{doc_id}")
+async def patch_invoice(doc_id: str, request: Request):
+    """RPA/review write-back: set workflow status and/or final ledger values.
+    {"status":"pending_review|mapped", "rpa_vendor":..., "rpa_invoice_number":...,
+     "rpa_date":"YYYY-MM-DD", "rpa_total":123456.78, "rpa_note":"...", "rpa_status":"ok|corrected|rejected"}"""
+    body = await request.json()
+    sets, vals = [], []
+    for k in ("status", "rpa_vendor", "rpa_invoice_number", "rpa_note", "rpa_status"):
+        if k in body:
+            sets.append(f"{k}=%s"); vals.append(body[k])
+    if "rpa_date" in body:
+        sets.append("rpa_date=NULLIF(%s,'')::date"); vals.append(body["rpa_date"])
+    if "rpa_total" in body:
+        sets.append("rpa_total=%s"); vals.append(body["rpa_total"])
+    if body.get("rpa_status") is not None:
+        sets.append("rpa_reviewed_at=now()")
+    if not sets:
+        raise HTTPException(400, "nothing to update")
+    vals.append(doc_id)
+    with db() as c, c.cursor() as cur:
+        cur.execute(f"UPDATE invoice_rows SET {', '.join(sets)}, updated_at=now() WHERE document_id=%s RETURNING id", vals)
+        if not cur.fetchone():
+            raise HTTPException(404, "invoice row not found")
+    return {"ok": True, "document_id": doc_id}
+
+
 @app.get("/documents/{doc_id}/mapped.csv")
 def mapped_csv(doc_id: str):
     """One CSV row per mapped document — drop straight into the vendor invoice table."""
@@ -574,6 +700,10 @@ async def map_doc(doc_id: str, request: Request):
         std["mapped"] = mapped
         cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
                     (json.dumps(std), doc_id))
+    try:
+        upsert_invoice_row(doc_id, (get_document(doc_id) or {}).get("filename", ""), std)
+    except Exception as ue:
+        print("LEDGER upsert (manual) failed:", str(ue)[:150], flush=True)
     return {"document_id": doc_id, "mapped": mapped}
 
 
@@ -658,6 +788,10 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         if os.environ.get("MAP_AUTO", "1") == "1" and (std.get("doc_type") or "").lower() == "invoice":
             try:
                 std["mapped"] = map_std_to_table(std)
+                try:
+                    upsert_invoice_row(doc_id, d["filename"], std)
+                except Exception as ue:
+                    print("LEDGER upsert failed:", str(ue)[:150], flush=True)
                 print("AUTO-MAP", doc_id[:8], "ok conf:", std["mapped"].get("confidence"), flush=True)
             except Exception as e:
                 std["mapped"] = {"error": str(e)[:300]}
