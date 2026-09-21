@@ -5,7 +5,9 @@ routing key 'job.deliver') + commit delivery task row (transaction with job DONE
 Validation fail: flag fields + notify n8n review webhook (the loop back).
 Also hosts /mock/receiving as stand-in downstream system."""
 import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request
+import time
 import threading
+import subprocess, tempfile
 import logging
 log = logging.getLogger("extractor")
 from pathlib import Path
@@ -235,15 +237,21 @@ async def upload(request: Request,
 def _auto_ocr_bg(doc_ids):
     """Option: auto-OCR (default engine) for flagged docs, sequential background thread.
     Triggered right after /documents/batch when OCR_AUTO=1. n8n OCR workflow not required."""
+    def one(did):
+        r = run_ocr(did)
+        print("AUTO-OCR", did[:8], "->", r.get("status"), r.get("chars"), "chars", flush=True)
+
     def worker():
         for did in doc_ids:
             try:
-                r = run_ocr(did)
-                log.info("AUTO-OCR %s -> %s (%s chars)", did[:8], r.get("status"), r.get("chars"))
-                print("AUTO-OCR", did[:8], "->", r.get("status"), r.get("chars"), "chars", flush=True)
+                one(did)
             except Exception as e:
-                log.warning("AUTO-OCR %s failed: %s", did[:8], str(e)[:200])
-                print("AUTO-OCR", did[:8], "FAILED:", str(e)[:200], flush=True)
+                print("AUTO-OCR", did[:8], "FAILED:", str(e)[:200], "- retry in 60s", flush=True)
+                try:
+                    time.sleep(60)
+                    one(did)
+                except Exception as e2:
+                    print("AUTO-OCR", did[:8], "FAILED AGAIN:", str(e2)[:200], flush=True)
     threading.Thread(target=worker, daemon=True).start()
 
 
@@ -418,7 +426,7 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
-    with ur.urlopen(req, timeout=180) as r:
+    with ur.urlopen(req, timeout=300) as r:
         d = json.load(r)
     t = d["choices"][0]["message"]["content"]
     if isinstance(t, list):
@@ -458,7 +466,6 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
             raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
         try:
             if mime == "application/pdf":
-                import subprocess, tempfile
                 info = subprocess.run(["pdfinfo", path], capture_output=True, text=True).stdout
                 n = OCR_MAX_PAGES
                 for ln in info.splitlines():
