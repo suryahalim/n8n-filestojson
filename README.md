@@ -134,5 +134,6 @@ docker exec dp-db psql -U pipeline -d n8n -Atc "SELECT id,status FROM execution_
 
 ## Pointers
 - Operations & UI walkthrough: `USAGE.md` · UI test suite (U-series): `TESTING.md` · OCR-focused playbook (T1–T8): `OCR_TEST_PLAYBOOK.md`
+- MVP AR design: `MVP_AR_RECON_DESIGN.md` · Ten-document pilot: `MVP_10_DOCUMENT_TEST.md`
 - Receiving contract: `TESTING.md` §4 · Real endpoint switch: set `TARGET_API_URL`
 - n8n workflows source of truth: `n8n/*.json` (keep committed copies in sync with live DB after every publish)

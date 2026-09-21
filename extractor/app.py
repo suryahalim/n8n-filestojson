@@ -532,7 +532,7 @@ def _parse_json_loose(txt: str):
 
 CLASSIFY_PROMPT = """Anda pengklasifikasi dokumen bisnis Indonesia. Dari potongan teks + nama file, tentukan:
 {
- "class": "invoice|faktur_penjualan|faktur_pajak|delivery_order|sales_order|purchase_order|surat_jalan|kwitansi|bon_transfer|kontrak|moU|surat_resmi|nota_retil|struk|laporan|proposal|lainnya",
+ "class": "invoice|faktur_penjualan|faktur_pajak|delivery_order|sales_order|purchase_order|work_order|surat_jalan|tanda_terima|kwitansi|bukti_transfer|bon_transfer|credit_note|kontrak|moU|surat_resmi|nota_retil|struk|laporan|proposal|lainnya",
  "money_doc": true/false,   // mengandung tagihan/nilai uang yang perlu masuk ledger penagihan
  "confidence": "high|medium|low",
  "title": "judul/label persis pada dokumen (max 80 char)",
@@ -544,7 +544,7 @@ CLASSIFY_PROMPT = """Anda pengklasifikasi dokumen bisnis Indonesia. Dari potonga
  "notes": "1 kalimat: dasar klasifikasi; hal penting bila money_doc=false"
 }
 Aturan: FAKTUR PENJUALAN/DELIVERY ORDER yang berisi barang+qty TERBIT PENJUAL = money_doc true (nanti di-map penuh).
-Bukti transfer/kwitansi = money_doc true. Kontrak/surat jalan tanpa harga/proposal/laporan = false.
+Bukti transfer/kwitansi/credit note = money_doc true. Work order/sales order/PO tanpa harga = false; jika ada nilai kontrak/tagihan, boleh true tetapi jangan mengarang invoice number. Kontrak/surat jalan/tanda terima tanpa harga/proposal/laporan = false.
 Jangan mengarang; null lebih baik. HANYA JSON."""
 
 def classify_document(std: dict, filename: str = "") -> dict:
