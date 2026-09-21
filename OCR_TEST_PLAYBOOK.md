@@ -14,7 +14,7 @@ Current state: `INGEST_ALLOW_DUP=1` → **same file can be uploaded repeatedly, 
 | Swagger API | http://100.68.212.36:5000/docs |
 | **OCR settings (key/model/endpoint)** | http://100.68.212.36:5000/view/settings |
 
-OCR trigger — not a Swagger endpoint; run it from n8n (Execute workflow) or curl:
+OCR trigger — since v1.4 it is **automatic**: any FLAGGED doc from a form/batch upload gets OCR'd right after intake (default engine, sequential queue). Manual trigger only needed for re-runs/engine overrides — from n8n (Execute workflow) or curl:
 ```
 POST http://100.68.212.36:5678/webhook/ocr-scan
 {"document_id":"<id>","engine":"qwen"}
@@ -92,6 +92,7 @@ While `INGEST_ALLOW_DUP=1`, the duplicate assertions inside test_batch_e2e (S7) 
 | `QWEN_MODEL` | qwen3.8-flash | swap to `qwen-vl-ocr` etc. — no code change |
 | `QWEN_API_KEY` | set | Token Plan key (never in n8n/repo) |
 | `OCR_ENGINE` | **qwen (default)** | fallback engine when caller omits `engine` — change to `tesseract` anytime |
+| `OCR_AUTO` | **1 (on)** | 1 = flagged docs auto-OCR immediately after form/batch upload; 0 = manual n8n trigger only |
 | `INGEST_ALLOW_DUP` | **1 (testing)** | 0 = dedupe sha256 ON for production |
 | `OCR_MAX_PAGES` | 30 | pages OCR'd per doc |
 

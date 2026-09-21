@@ -5,6 +5,9 @@ routing key 'job.deliver') + commit delivery task row (transaction with job DONE
 Validation fail: flag fields + notify n8n review webhook (the loop back).
 Also hosts /mock/receiving as stand-in downstream system."""
 import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request
+import threading
+import logging
+log = logging.getLogger("extractor")
 from pathlib import Path
 import psycopg2, psycopg2.extras
 from fastapi.responses import FileResponse
@@ -229,6 +232,23 @@ async def upload(request: Request,
     return await ingest_one(raw, file.filename, file.content_type or "", doc_type, notes)
 
 
+def _auto_ocr_bg(doc_ids):
+    """Option: auto-OCR (default engine) for flagged docs, sequential background thread.
+    Triggered right after /documents/batch when OCR_AUTO=1. n8n OCR workflow not required."""
+    def worker():
+        for did in doc_ids:
+            try:
+                r = run_ocr(did)
+                log.info("AUTO-OCR %s -> %s (%s chars)", did[:8], r.get("status"), r.get("chars"))
+                print("AUTO-OCR", did[:8], "->", r.get("status"), r.get("chars"), "chars", flush=True)
+            except Exception as e:
+                log.warning("AUTO-OCR %s failed: %s", did[:8], str(e)[:200])
+                print("AUTO-OCR", did[:8], "FAILED:", str(e)[:200], flush=True)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+@app.post("/documents/batch")
+
 @app.post("/documents/batch")
 async def upload_batch(request: Request):
     """Batch intake: {doc_type, notes, skip_existing=true, files:[{name,data_b64}]}
@@ -273,6 +293,14 @@ async def upload_batch(request: Request):
     counts = {}
     for r in results:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    # Auto-chain: form upload -> FLAGGED docs get OCR'd immediately (default engine
+    # from settings), sequential background thread. OCR_AUTO=0 disables.
+    if os.environ.get("OCR_AUTO", "1") == "1" and "auto_ocr" not in body:
+        flagged = [r["document_id"] for r in results if r.get("status") == "FLAGGED"]
+        if flagged:
+            _auto_ocr_bg(flagged)
+        return {"batch": True, "total": len(results), "summary": counts,
+                "auto_ocr_started": len(flagged), "results": results}
     return {"batch": True, "total": len(results), "summary": counts, "results": results}
 
 

@@ -38,6 +38,8 @@ IT document ingestion → extraction → validation → OCR → service-bus deli
 
 ## Configuration (single source: `~/doc-pipeline/.env`, gitignored, mode 600)
 
+**Auto-chain OCR (since v1.4):** uploading via the n8n form is now end-to-end — flagged documents (scans/photos with no text layer) get OCR'd **automatically** right after intake, sequentially in a background thread, using the default engine from Settings. No manual "Execute workflow" needed; the form still answers immediately and delivery follows seconds-to-minutes later (watch `/view`). Disable with `OCR_AUTO=0`; per-batch override `"auto_ocr": false` in payload. The manual n8n OCR workflow remains for re-runs/engine overrides.
+
 **Primary path since 2026-09-20: the Settings UI** — `http://<host>:5000/view/settings` edits endpoint URL / API key / model / default engine, saved to `data/ocr_config.json`, **hot-reloaded on the next request — no restart, no compose edit, no n8n change**. Saves are gated by a live test-connection (tiny vision call): wrong key → "key rejected (401)", wrong model name → "model not available in this plan (404)" (this is how qwen-vl-ocr's absence was caught), unreachable URL → timeout hint. `Force save` bypasses the gate. Key is never returned by the API (masked only: prefix…suffix + sha8). Optional PIN gate: set `SETTINGS_PIN` in `.env`. Design: `DESIGN_OCR_SETTINGS.md`.
 
 Env vars below are the **bootstrap/DR path** (used only until the UI saves a config; delete `data/ocr_config.json` to fall back):
