@@ -231,7 +231,15 @@ async def upload(request: Request,
     raw = await file.read()
     if not raw:
         raise HTTPException(400, "empty file")
-    return await ingest_one(raw, file.filename, file.content_type or "", doc_type, notes)
+    result = await ingest_one(raw, file.filename, file.content_type or "", doc_type, notes)
+    if os.environ.get("OCR_AUTO", "1") == "1" and result.get("document_id"):
+        if result.get("status") == "FLAGGED":
+            _auto_ocr_bg([result["document_id"]])
+            result["auto_ocr_started"] = 1
+        elif result.get("status") == "VALIDATED" and os.environ.get("MAP_AUTO", "1") == "1":
+            _auto_map_bg([result["document_id"]])
+            result["auto_map_started"] = 1
+    return result
 
 
 def _auto_map_bg(doc_ids):
