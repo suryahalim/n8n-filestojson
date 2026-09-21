@@ -47,7 +47,10 @@ def make_fresh_copies(tag):
     n["pdf"] = f"/tmp/_batch_po_{tag}.pdf"
     # jpg: copy with slight quality tweak -> different bytes
     from PIL import Image
-    im = Image.open(FIX + "SCAN-photo-DN-991.jpg")
+    im = Image.open(FIX + "SCAN-photo-DN-991.jpg").convert("RGB")
+    # Make each run's photo bytes unique so prior test runs cannot poison dedupe.
+    px = im.load()
+    px[0, 0] = ((px[0, 0][0] + int(tag[-1])) % 256, px[0, 0][1], px[0, 0][2])
     n["jpg"] = "/tmp/_batch_photo.jpg"
     im.save(n["jpg"], quality=88)
     return n
