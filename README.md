@@ -98,6 +98,14 @@ python3 tests/test_api_e2e.py               # green stack proof
 ```
 **Note:** `.env` is NOT in the repo by design (secrets never committed — verified by full-history scan). Restore it from the current server's copy.
 
+## Standard invoice ledger (RPA contract)
+
+Every OCR'd document with `doc_type=invoice` is normalized into the **`invoice_rows`** table (Postgres `pipeline`) — one row per document, safe to re-extract (upsert; review columns preserved).
+
+- Columns: extraction result (vendor*, invoice_number + source/confidence, invoice_date, ref_po, subtotal/tax/total NUMERIC, total_as_written, line_items/handwritten JSONB, confidence, missing, notes, mapper_model) + RPA write-back columns (`rpa_vendor, rpa_invoice_number, rpa_date, rpa_total, rpa_note, rpa_status, rpa_reviewed_at`) + workflow `status`: `extracted → pending_review → mapped`.
+- RPA endpoints: `GET /invoices?status=extracted` (pull queue) · `PATCH /invoices/{document_id}` (claim / write final values) · `GET /invoices/export.csv` (24-col ledger). RPA calls are pure Postgres — **zero LLM tokens**; only OCR and the mapping step consume the model.
+- **Schema policy (decided 2026-09-21):** schema lives ONLY in `db-init/*.sql` migrations — no DDL in app code. Fresh machine: postgres applies all db-init files automatically on first provision. **Existing DB created before a migration: apply it once manually**, e.g. `docker exec -i dp-db psql -U pipeline -d pipeline < db-init/03-invoice-rows.sql`. Same rule for any future table change.
+
 ## Maintenance runbook
 
 **Invoice → structured table mapping (v1.5):** OCR'd documents whose `doc_type` is `invoice` get an extra auto step: `map_std_to_table()` sends the extracted text to the same LLM endpoint (config from Settings UI) with an Indonesian invoice-extraction prompt and stores the result in `standard_json.mapped` — normalized Rupiah (`Rp 1.234.567,89` → `1234567.89`), invoice number + `number_source` (printed/handwritten/stamp/inferred) + confidence, dates ISO, line items, handwritten transcriptions with interpretations, `missing[]` and `notes`. `/view/<id>` renders it as tables; `GET /documents/{id}/mapped.csv` = one CSV row for the vendor ledger; delivered payload includes `mapped` so downstream/n8n can consume JSON directly. Manual: `POST /documents/{id}/map {"doc_type":"invoice"}`. Knobs: `MAP_AUTO=0` disables auto step, `MAP_TIMEOUT` (default 600s). Multi-page cost control: >3 pages → full text of pages 1-2 + last + 300-char digests of the middle (a raw 28K-char 33-page doc exceeded 300s model generation; the digest version finished in ~197s).

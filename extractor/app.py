@@ -524,35 +524,11 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
     return out
 
 
-# ---- invoice_rows: standard vendor-invoice ledger (v1.5) ----------------------
-INVOICE_ROWS_DDL = """CREATE TABLE IF NOT EXISTS invoice_rows (
-  id BIGSERIAL PRIMARY KEY,
-  document_id TEXT NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
-  filename TEXT, vendor_name TEXT, vendor_npwp TEXT, vendor_address TEXT,
-  doc_type_label TEXT, invoice_number TEXT, invoice_number_source TEXT,
-  invoice_number_confidence TEXT, invoice_date DATE, ref_po TEXT,
-  currency TEXT DEFAULT 'IDR', subtotal NUMERIC(16,2), tax NUMERIC(16,2),
-  total NUMERIC(16,2), total_as_written TEXT,
-  line_items JSONB DEFAULT '[]'::jsonb, handwritten JSONB DEFAULT '[]'::jsonb,
-  confidence TEXT, missing TEXT, notes TEXT, mapper_model TEXT,
-  mapped_at TIMESTAMPTZ DEFAULT now(),
-  status TEXT NOT NULL DEFAULT 'extracted',
-  rpa_vendor TEXT, rpa_invoice_number TEXT, rpa_date DATE, rpa_total NUMERIC(16,2),
-  rpa_note TEXT, rpa_status TEXT, rpa_reviewed_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
-CREATE INDEX IF NOT EXISTS invoice_rows_status_idx ON invoice_rows (status, invoice_date);"""
-
-def ensure_invoice_rows_table():
-    try:
-        with db() as c, c.cursor() as cur:
-            cur.execute(INVOICE_ROWS_DDL)
-        return True
-    except Exception as e:
-        print("invoice_rows DDL skipped:", str(e)[:120], flush=True)
-        return False
-
-
-ensure_invoice_rows_table()
+# ---- invoice_rows: standard vendor-invoice ledger (v1.5) --------------------
+# Schema lives ONLY in db-init/03-invoice-rows.sql (migrations, not app code).
+# Fresh machine: postgres creates it automatically (docker-entrypoint-initdb.d).
+# Existing DB (created before v1.5): apply once —
+#   docker exec -i dp-db psql -U pipeline -d pipeline < db-init/03-invoice-rows.sql
 
 
 def upsert_invoice_row(doc_id, filename, std):
