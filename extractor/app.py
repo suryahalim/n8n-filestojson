@@ -423,6 +423,37 @@ def _auto_ocr_bg(doc_ids):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def _recover_pending_bg():
+    """Recover interrupted OCR/mapping after service restart; DB is the queue of record."""
+    def worker():
+        time.sleep(3)
+        try:
+            with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""SELECT id, status, standard_json FROM documents
+                              WHERE status='FLAGGED' AND COALESCE(standard_json->>'ocr_engine','')=''
+                              ORDER BY created LIMIT 50""")
+                flagged = [r["id"] for r in cur.fetchall()]
+                cur.execute("""SELECT id FROM documents
+                              WHERE status='VALIDATED' AND standard_json IS NOT NULL
+                                AND NOT (standard_json ? 'classified')
+                              ORDER BY created LIMIT 50""")
+                validated = [r["id"] for r in cur.fetchall()]
+            if os.environ.get("OCR_AUTO", "1") == "1" and flagged:
+                print("AUTO-RECOVER-OCR", len(flagged), flush=True)
+                _auto_ocr_bg(flagged)
+            if os.environ.get("MAP_AUTO", "1") == "1" and validated:
+                print("AUTO-RECOVER-MAP", len(validated), flush=True)
+                _auto_map_bg(validated)
+        except Exception as e:
+            print("AUTO-RECOVER FAILED:", str(e)[:300], flush=True)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+@app.on_event("startup")
+def recover_pending_on_startup():
+    _recover_pending_bg()
+
+
 @app.post("/documents/batch")
 
 @app.post("/documents/batch")
