@@ -404,6 +404,7 @@ def _auto_map_bg(doc_ids):
 def _auto_ocr_bg(doc_ids):
     """Option: auto-OCR (default engine) for flagged docs, sequential background thread.
     Triggered right after /documents/batch when OCR_AUTO=1. n8n OCR workflow not required."""
+    print("AUTO-OCR-QUEUED", ",".join(str(x)[:8] for x in doc_ids), flush=True)
     def one(did):
         r = run_ocr(did)
         print("AUTO-OCR", did[:8], "->", r.get("status"), r.get("chars"), "chars", flush=True)
