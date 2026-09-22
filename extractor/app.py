@@ -743,21 +743,100 @@ def llm_text(prompt: str, cfg, max_tokens: int = 4000) -> str:
     raise last_error
 
 
-def _map_line_items_by_pages(std: dict, cfg: dict):
-    pages = std.get("pages") or []
-    if not pages:
-        return []
-    items = []
-    for start in range(0, len(pages), 3):
-        chunk = pages[start:start + 3]
-        text = "\n".join(f"--- HALAMAN {p.get('page', start+i+1)} ---\n{p.get('text','')}"
-                          for i, p in enumerate(chunk))
-        if len(text.strip()) < 10:
+AGENT_PLAN_PROMPT = """Anda adalah planner ekstraksi tabel dokumen.
+Buat rencana kerja dari metadata halaman OCR. Keluarkan JSON saja:
+{"groups":[{"pages":[1,2,3],"reason":"...","table_expected":true}]}
+Aturan:
+- Kelompokkan halaman berurutan maksimal 3 halaman per group.
+- Jangan melewati halaman.
+- Jika halaman tampak header/total tanpa tabel, tetap masukkan bila terkait dokumen.
+- Jangan mengarang nomor halaman.
+"""
+
+
+def _agent_validate_items(items, page_numbers):
+    issues = []
+    seen = set()
+    for i, item in enumerate(items or [], 1):
+        if not isinstance(item, dict):
+            issues.append(f"item {i} bukan object")
             continue
-        raw = llm_text(TABLE_ITEMS_PROMPT + "\n\n=== TEKS OCR ===\n" + text[:14000], cfg, max_tokens=2200)
-        out = _parse_json_loose(raw)
-        items.extend(out.get("line_items") or [])
-    return items
+        key = (item.get("page"), item.get("code"), (item.get("description") or "").strip().lower())
+        if key in seen and key != (None, None, ""):
+            issues.append(f"duplikat item pada halaman {item.get('page')}")
+        seen.add(key)
+        if item.get("page") is not None:
+            try:
+                if int(item["page"]) not in page_numbers:
+                    issues.append(f"page {item.get('page')} di luar chunk")
+            except Exception:
+                issues.append(f"page {item.get('page')} bukan angka")
+    return issues
+
+
+def _agent_plan_pages(std, cfg):
+    pages = std.get("pages") or []
+    page_text = "\n".join(f"PAGE {p.get('page', i+1)}: {(p.get('text') or '')[:500]}"
+                            for i, p in enumerate(pages))
+    try:
+        raw = llm_text(AGENT_PLAN_PROMPT + "\n\n" + page_text[:12000], cfg, max_tokens=1200)
+        plan = _parse_json_loose(raw)
+        groups = plan.get("groups") or []
+        valid = []
+        all_pages = {int(p.get("page", i + 1)) for i, p in enumerate(pages)}
+        for group in groups:
+            nums = [int(n) for n in (group.get("pages") or []) if int(n) in all_pages]
+            if nums:
+                valid.append({"pages": nums[:3], "reason": group.get("reason", "agent plan")})
+        if valid:
+            return valid
+    except Exception as e:
+        print("AGENT-MAP-PLAN-FAILED", str(e)[:180], flush=True)
+    nums = [int(p.get("page", i + 1)) for i, p in enumerate(pages)]
+    return [{"pages": nums[i:i + 3], "reason": "bounded fallback chunk"}
+            for i in range(0, len(nums), 3)]
+
+
+def _agent_extract_group(std, cfg, group, repair=""):
+    pages = std.get("pages") or []
+    wanted = set(group["pages"])
+    selected = [p for i, p in enumerate(pages) if int(p.get("page", i + 1)) in wanted]
+    text = "\n".join(f"--- HALAMAN {p.get('page', i+1)} ---\n{p.get('text','')}"
+                      for i, p in enumerate(selected))
+    prompt = TABLE_ITEMS_PROMPT
+    if repair:
+        prompt += "\nPERBAIKAN WAJIB: " + repair
+    raw = llm_text(prompt + "\n\n=== TEKS OCR ===\n" + text[:14000], cfg, max_tokens=2200)
+    out = _parse_json_loose(raw)
+    return out.get("line_items") or []
+
+
+def _agent_map_line_items(std, cfg):
+    """Bounded agent loop: plan -> extract -> validate -> repair -> merge."""
+    plan = _agent_plan_pages(std, cfg)
+    print("AGENT-MAP-PLAN", len(plan), "groups", flush=True)
+    merged = []
+    trace = []
+    max_retries = int(os.environ.get("MAPPING_AGENT_RETRIES", "2"))
+    for index, group in enumerate(plan, 1):
+        items, issues, repair = [], [], ""
+        for attempt in range(1, max_retries + 1):
+            print("AGENT-MAP-STEP", index, "extract", attempt, group["pages"], flush=True)
+            items = _agent_extract_group(std, cfg, group, repair)
+            issues = _agent_validate_items(items, set(group["pages"]))
+            if not issues:
+                break
+            repair = "; ".join(issues[:5])
+            print("AGENT-MAP-REPAIR", index, attempt, repair, flush=True)
+        merged.extend(items)
+        trace.append({"group": group["pages"], "attempts": attempt, "issues": issues})
+    unique = []
+    seen = set()
+    for item in merged:
+        key = (item.get("page"), item.get("code"), (item.get("description") or "").strip().lower(), item.get("qty"))
+        if key not in seen:
+            seen.add(key); unique.append(item)
+    return unique, {"planner": "llm", "groups": len(plan), "trace": trace}
 
 
 def _parse_json_loose(txt: str):
@@ -891,10 +970,11 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
     out = _parse_json_loose(raw)
     if std.get("kind") == "pdf" and (std.get("pages") or []):
         try:
-            page_items = _map_line_items_by_pages(std, cfg)
+            page_items, agent_trace = _agent_map_line_items(std, cfg)
             if page_items:
                 out["line_items"] = page_items
-                print("AUTO-MAP-LINE-ITEMS", len(page_items), "rows", flush=True)
+                out["_mapping_agent"] = agent_trace
+                print("AGENT-MAP-DONE", len(page_items), "rows", flush=True)
         except Exception as e:
             print("AUTO-MAP-LINE-ITEMS-FAILED", str(e)[:180], flush=True)
     out["_mapper"] = {"model": cfg["model"], "source_chars": len(text)}
