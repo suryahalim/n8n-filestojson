@@ -1332,7 +1332,7 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         if mapping_error:
             ok = False
             flags = list(flags) + [{"rule": "mapping completed", "field": "mapped", "value": "error"}]
-        deliverable = ok and not bool(std.get("parts_created"))
+        deliverable = ok and os.environ.get("MAP_AUTO", "0") == "1" and not bool(std.get("parts_created"))
         final_status = "SPLIT_PARENT" if std.get("parts_created") else ("VALIDATED" if ok else "FLAGGED")
         cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, "
                     "status=%s, review_loop=review_loop+1, updated=now() WHERE id=%s",
