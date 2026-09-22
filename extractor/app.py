@@ -470,7 +470,7 @@ async def upload_batch(request: Request):
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     # Auto-chain: form upload -> FLAGGED docs get OCR'd immediately (default engine
     # from settings), sequential background thread. OCR_AUTO=0 disables.
-    if os.environ.get("OCR_AUTO", "1") == "1" and body.get("auto_ocr", True) is not False:
+    if os.environ.get("OCR_AUTO", "1") == "1":
         flagged = [r["document_id"] for r in results if r.get("status") == "FLAGGED"]
         validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
         if flagged:
