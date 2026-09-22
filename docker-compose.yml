@@ -23,7 +23,6 @@ services:
       - N8N_DEFAULT_USER_PASSWORD=${N8N_OWNER_PASS}
       - N8N_RUNNERS_ENABLED=true
       - N8N_SECURE_COOKIE=false
-      - QWEN_API_KEY=${QWEN_API_KEY}
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - EXECUTIONS_DATA_PRUNE=true
       - EXECUTIONS_DATA_MAX_AGE=336
@@ -90,7 +89,7 @@ services:
       - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
       - OCR_MAX_PAGES=${OCR_MAX_PAGES:-0}
       - OCR_AUTO=${OCR_AUTO:-1}
-      - MAP_AUTO=${MAP_AUTO:-1}
+      - MAP_AUTO=${MAP_AUTO:-0}
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving

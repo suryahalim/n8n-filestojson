@@ -239,7 +239,7 @@ async def upload(request: Request,
         if result.get("status") == "FLAGGED":
             _auto_ocr_bg([result["document_id"]])
             result["auto_ocr_started"] = 1
-        elif result.get("status") == "VALIDATED" and os.environ.get("MAP_AUTO", "1") == "1":
+        elif result.get("status") == "VALIDATED" and os.environ.get("MAP_AUTO", "0") == "1":
             _auto_map_bg([result["document_id"]])
             result["auto_map_started"] = 1
     return result
@@ -472,10 +472,10 @@ def _recover_pending_bg():
             if os.environ.get("OCR_AUTO", "1") == "1" and flagged:
                 print("AUTO-RECOVER-OCR", len(flagged), flush=True)
                 _auto_ocr_bg(flagged)
-            if os.environ.get("MAP_AUTO", "1") == "1" and map_pending:
+            if os.environ.get("MAP_AUTO", "0") == "1" and map_pending:
                 print("AUTO-RECOVER-MAP-PENDING", len(map_pending), flush=True)
                 _auto_map_bg(map_pending)
-            if os.environ.get("MAP_AUTO", "1") == "1" and validated:
+            if os.environ.get("MAP_AUTO", "0") == "1" and validated:
                 print("AUTO-RECOVER-MAP", len(validated), flush=True)
                 _auto_map_bg(validated)
         except Exception as e:
@@ -541,7 +541,7 @@ async def upload_batch(request: Request):
         validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
         if flagged:
             _auto_ocr_bg(flagged)
-        if validated and os.environ.get("MAP_AUTO", "1") == "1":
+        if validated and os.environ.get("MAP_AUTO", "0") == "1":
             _auto_map_bg(validated)
         return {"batch": True, "total": len(results), "summary": counts,
                 "auto_ocr_started": len(flagged), "auto_map_started": len(validated), "results": results}
@@ -1238,6 +1238,20 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                         if last_error is not None:
                             raise last_error
                         pages_text.append({"page": i, "text": txt})
+                        progress_std = dict(std)
+                        progress_std["kind"] = "pdf"
+                        progress_std["ocr_engine"] = engine
+                        if engine == "qwen":
+                            progress_std["ocr_model"] = ocr_cfg["model"]
+                        progress_std["pages"] = list(pages_text)
+                        progress_std["ocr_progress"] = {
+                            "status": "RUNNING", "completed_pages": i,
+                            "total_pages": len(pngs), "completed_chars": sum(len(p["text"]) for p in pages_text),
+                            "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
+                        }
+                        cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
+                                    (json.dumps(progress_std), doc_id))
+                        c.commit()
                         print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} DONE", len(txt), "chars", flush=True)
                 std["kind"] = "pdf"
                 std["ocr_engine"] = engine
@@ -1277,8 +1291,15 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         else:
             std["ocr"] = pages_text[0]["text"]
 
-        # Auto-map: invoice docs get the normalized vendor-table row as part of OCR.
-        if os.environ.get("MAP_AUTO", "1") == "1":
+        std["ocr_progress"] = {
+            "status": "COMPLETED", "completed_pages": len(pages_text),
+            "total_pages": len(pages_text),
+            "completed_chars": sum(len(p.get("text", "")) for p in pages_text),
+            "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
+        }
+
+        # Auto-map is intentionally disabled in OCR-only mode (MAP_AUTO=0).
+        if os.environ.get("MAP_AUTO", "0") == "1":
             try:
                 children = _split_parent_if_needed(doc_id, std, d["filename"])
                 if children:
@@ -1368,6 +1389,25 @@ def get_document(doc_id: str):
         cur.execute("SELECT child_document_id,page_start,page_end,detected_class,confidence,status FROM document_parts WHERE parent_document_id=%s ORDER BY page_start", (doc_id,))
         d["parts"] = [dict(r) for r in cur.fetchall()]
     return d
+
+
+@app.get("/documents/{doc_id}/progress")
+def get_document_progress(doc_id: str):
+    """Lightweight polling endpoint for OCR-only uploads."""
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT id,filename,status,standard_json,created,updated FROM documents WHERE id=%s", (doc_id,))
+        d = cur.fetchone()
+    if not d:
+        raise HTTPException(404, "not found")
+    std = d.get("standard_json") or {}
+    progress = std.get("ocr_progress") or {}
+    pages = std.get("pages") or []
+    return {
+        "document_id": d["id"], "filename": d["filename"], "status": d["status"],
+        "ocr_progress": progress, "pages_available": len(pages),
+        "raw_text_chars_available": sum(len(p.get("text", "")) for p in pages),
+        "updated": d["updated"]
+    }
 
 
 # ---- human-readable HTML views (browser results) ----
