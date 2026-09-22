@@ -190,6 +190,7 @@ Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>",
 ### U12 · Same 19-pager through Qwen (engine=qwen) — PASS ✅ (2026-09-18)
 `{"document_id":"…","engine":"qwen"}` → n8n webhook → 19 pages, 29,835 chars, VALIDATED→DELIVERED in **425 s** (~22 s/page, sequential). Quality vs Tesseract: phone/fax digits clean (`(021) 4601849, 4600093`), dates exact (`22-Jul-2026`, `28-Jul-2026`), SO/CPO numbers (`2100115362`), salesman `AHMAD TAHJUDIN`, warehouse/zone codes. Company header partially garbled on the decorative logo area (`PT . . . ANA ABADI` — stamp/logo region), and doc has no literal `SO-` prefix (it's `Sales Order [SO] #`), so token assertions must match real content, not guesses. Re-OCR replaces previous engine text (bug fixed `7992d61`).
 
+**Auto-OCR:** batch uploads now auto-trigger OCR for every `FLAGGED` file by default when `OCR_AUTO=1`. The extractor only skips it when the caller explicitly sends `"auto_ocr": false`. `OCR_MAX_PAGES=0` means all pages are processed; set a positive value only when an operational cap is required.
 ## 6. Dedupe toggle (for testing)
 
 Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re-ingest but can be blocked by UI flows). To test with the SAME file repeatedly: set `INGEST_ALLOW_DUP=1` in `.env`, then `docker compose up -d extractor` — bypasses ALL dedupe (form/batch/single). Verified: same PDF 3× via batch + 1× via single = 4 separate documents. Return to `0` for production.

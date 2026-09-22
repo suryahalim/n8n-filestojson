@@ -130,7 +130,7 @@ Upload foto/kwitansi dengan Document type = **Other** → DELIVERED tanpa blok M
 | `OCR_ENGINE` | **qwen (default)** | fallback engine when caller omits `engine` — change to `tesseract` anytime |
 | `OCR_AUTO` | **1 (on)** | 1 = flagged docs auto-OCR immediately after form/batch upload; 0 = manual n8n trigger only |
 | `INGEST_ALLOW_DUP` | **1 (testing)** | 0 = dedupe sha256 ON for production |
-| `OCR_MAX_PAGES` | 30 | pages OCR'd per doc |
+| `OCR_MAX_PAGES` | 0 | `0` = all pages; positive value = optional cap |
 
 ## 12. After testing — restore production behavior
 ```bash

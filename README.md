@@ -58,7 +58,7 @@ Env vars below are the **bootstrap/DR path** (used only until the UI saves a con
 | `QWEN_URL` | token-plan compatible-mode | chat-completions endpoint |
 | `OCR_ENGINE` | `qwen` | fallback engine when caller omits `engine` (`qwen`\|`tesseract`) |
 | `INGEST_ALLOW_DUP` | `1` (testing) | `0` = sha256 dedupe ON for production |
-| `OCR_MAX_PAGES` / `OCR_DPI` | `30` / `200` | OCR page cap / render DPI |
+| `OCR_MAX_PAGES` / `OCR_DPI` | `0` / `200` | `0` = process every page; positive value = optional OCR cap / render DPI |
 | `TARGET_API_URL` | mock | real receiving endpoint; contract `{"accepted":true}` |
 
 Change any of these → `cd ~/doc-pipeline && docker compose up -d extractor` (env vars are read at container start).

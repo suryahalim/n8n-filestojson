@@ -470,7 +470,7 @@ async def upload_batch(request: Request):
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     # Auto-chain: form upload -> FLAGGED docs get OCR'd immediately (default engine
     # from settings), sequential background thread. OCR_AUTO=0 disables.
-    if os.environ.get("OCR_AUTO", "1") == "1" and "auto_ocr" not in body:
+    if os.environ.get("OCR_AUTO", "1") == "1" and body.get("auto_ocr", True) is not False:
         flagged = [r["document_id"] for r in results if r.get("status") == "FLAGGED"]
         validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
         if flagged:
@@ -511,7 +511,7 @@ async def correct_fields(doc_id: str, request: Request):
     return {"document_id": doc_id, "validated": ok, "delivery_task": task_id, "flags": flags}
 
 
-OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "30"))
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "0"))  # 0 = process every page
 OCR_DPI = os.environ.get("OCR_DPI", "200")
 
 # --- Runtime OCR config (UI-editable, hot-reload by mtime; env = bootstrap only) ---
@@ -969,7 +969,8 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                 n = OCR_MAX_PAGES
                 for ln in info.splitlines():
                     if ln.startswith("Pages"):
-                        n = min(OCR_MAX_PAGES, int(ln.split(":")[-1].strip()))
+                        total_pages = int(ln.split(":")[-1].strip())
+                        n = total_pages if OCR_MAX_PAGES <= 0 else min(OCR_MAX_PAGES, total_pages)
                 with tempfile.TemporaryDirectory() as td:
                     prefix = os.path.join(td, "pg")
                     subprocess.run(["pdftoppm", "-png", "-r", OCR_DPI, "-f", "1", "-l", str(n), path, prefix],
