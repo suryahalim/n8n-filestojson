@@ -18,6 +18,43 @@ Version: 2026-09-18 · All cases executed live on this date — **PASS** (U10 is
 | n8n | http://100.68.212.36:5678 | Executions = audit of each form/webhook run |
 | RabbitMQ | http://100.68.212.36:15672 (`pipeline` / `.env`) | watch queue `job.deliver` drain |
 
+### FastAPI documentation and credentials
+
+The extractor is a FastAPI service. Its generated API documentation is available at:
+
+```text
+Swagger UI:  http://100.68.212.36:5000/docs
+ReDoc:       http://100.68.212.36:5000/redoc
+OpenAPI JSON: http://100.68.212.36:5000/openapi.json
+Health:      http://100.68.212.36:5000/health
+```
+
+The current extractor endpoints do not require an API token when accessed on the protected Tailscale network. Do not expose port 5000 publicly without adding an auth layer.
+
+Credential checklist for a fresh test environment:
+
+| Credential/config | Needed for | Where it belongs | GitHub policy |
+|---|---|---|---|
+| `PIPELINE_DB_PASSWORD` | Postgres, n8n DB, extractor DB | local `.env` | placeholder only |
+| `RABBITMQ_USER` / `RABBITMQ_PASS` | RabbitMQ UI and worker | local `.env` | placeholder only |
+| `N8N_OWNER_EMAIL` / `N8N_OWNER_PASS` | n8n editor login | local `.env` | placeholder only |
+| `N8N_ENCRYPTION_KEY` | n8n credential/database encryption | local `.env` | placeholder only |
+| `QWEN_API_KEY` | Qwen OCR/classification/mapping | extractor `.env` or `/view/settings` | never commit |
+| `SETTINGS_PIN` | optional protection for OCR Settings UI | local `.env` | placeholder only |
+
+Non-secret test values are documented in `.env.example`. Copy it to `.env`, replace every `change-me` value locally, and use `chmod 600 .env`. The runtime OCR key may also be stored in `data/ocr_config.json`, which is gitignored and must remain local.
+
+Never put real passwords, API keys, OAuth tokens, encryption keys, or connection strings in `TESTING.md`, `README.md`, workflow JSON, issues, or commits. Use `[REDACTED]` or `change-me` in shared documentation. Existing live credentials are intentionally not reproduced here.
+
+Credential requirements by test:
+
+- U0/U1/U2/U3/U4/U7/U8/U13 through the form/API: no credential in the request; network access to the host is required.
+- n8n editor/execution inspection: `N8N_OWNER_EMAIL` + `N8N_OWNER_PASS`.
+- RabbitMQ inspection: `RABBITMQ_USER` + `RABBITMQ_PASS`.
+- Qwen OCR tests: `QWEN_API_KEY`, unless using local Tesseract only.
+- Direct PostgreSQL verification: `PIPELINE_DB_PASSWORD` and local Docker access.
+- `tests/test_api_e2e.py` and `tests/test_batch_e2e.py`: local Docker stack and fixtures; they read the configured service endpoints and do not need a credential in the test command.
+
 ## 1. Fixture pack (the "PowerStore PO" story)
 
 | File | Kind | Used in |

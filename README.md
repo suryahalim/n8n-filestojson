@@ -36,6 +36,8 @@ IT document ingestion → extraction → validation → OCR → service-bus deli
 
 **Key design rule:** API keys, model, and endpoint live ONLY in the extractor (runtime file `data/ocr_config.json`, editable at `/view/settings`, hot-reloaded; env vars as bootstrap). n8n never holds or forwards secrets — its OCR workflow only routes `document_id` + engine choice to extractor endpoints. Swapping OCR model/provider = save in the UI, effective instantly, zero restarts and zero workflow edits.
 
+**FastAPI docs:** `http://<host>:5000/docs` (Swagger UI) · `http://<host>:5000/redoc` (ReDoc) · `http://<host>:5000/openapi.json` (OpenAPI). The current extractor API has no request-token auth on the protected Tailscale network; do not expose port 5000 publicly without adding auth. Credential setup and the redacted test checklist are in `TESTING.md` §0.
+
 ## Configuration (single source: `~/doc-pipeline/.env`, gitignored, mode 600)
 
 **Auto-chain OCR (since v1.4):** uploading via the n8n form is now end-to-end — flagged documents (scans/photos with no text layer) get OCR'd **automatically** right after intake, sequentially in a background thread, using the default engine from Settings. No manual "Execute workflow" needed; the form still answers immediately and delivery follows seconds-to-minutes later (watch `/view`). Disable with `OCR_AUTO=0`; per-batch override `"auto_ocr": false` in payload. The manual n8n OCR workflow remains for re-runs/engine overrides.
