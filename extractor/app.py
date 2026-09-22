@@ -352,11 +352,20 @@ def _map_one_now(did: str):
     std = dict(row["standard_json"] or {})
     if std.get("mapped") or std.get("classified"): return
     classify_and_route(did, std, row["filename"], explicit_invoice=False)
+    task_id = None
     with db() as c, c.cursor() as cur:
-        cur.execute("UPDATE documents SET standard_json=%s::jsonb, status='VALIDATED', updated=now() WHERE id=%s", (json.dumps(std), did)); c.commit()
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, status='VALIDATED', updated=now() WHERE id=%s", (json.dumps(std), did))
+        if std.get("mapped") or std.get("classified"):
+            task_id = str(uuid.uuid4())
+            cur.execute("INSERT INTO delivery_tasks(id,document_id,target_url,status) VALUES(%s,%s,%s,'QUEUED')",
+                        (task_id, did, TARGET_API_URL))
+        c.commit()
+    if std.get("mapped") or std.get("classified"):
+        publish("deliver", {"task_id": task_id, "document_id": did})
     if std.get("mapped"):
         upsert_invoice_row(did, row["filename"], std)
-    print("AUTO-MAP(child)", did[:8], "->", (std.get("classified") or {}).get("class"), flush=True)
+    print("AUTO-MAP(child)", did[:8], "->", (std.get("classified") or {}).get("class"),
+          "delivery=" + (task_id or "none"), flush=True)
 
 
 def _auto_map_bg(doc_ids):
@@ -1085,21 +1094,24 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         env = {"schema_version": std.get("schema_version", "1.0"), "document_id": doc_id,
                "filename": d["filename"], "sha256": d["sha256"], "extracted": std}
         ok, flags = validate(env)
+        deliverable = ok and not bool(std.get("parts_created"))
+        final_status = "SPLIT_PARENT" if std.get("parts_created") else ("VALIDATED" if ok else "FLAGGED")
         cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, "
                     "status=%s, review_loop=review_loop+1, updated=now() WHERE id=%s",
                     (json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}),
-                     "VALIDATED" if ok else "FLAGGED", doc_id))
+                     final_status, doc_id))
         task_id = None
-        if ok:
+        if deliverable:
             task_id = str(uuid.uuid4())
             cur.execute("INSERT INTO delivery_tasks(id,document_id,target_url,status) "
                         "VALUES(%s,%s,%s,'QUEUED')", (task_id, doc_id, TARGET_API_URL))
         c.commit()
-        if ok:
+        if deliverable:
             publish("deliver", {"task_id": task_id, "document_id": doc_id})
         total_chars = sum(len(p["text"]) for p in std.get("pages", pages_text)) if std.get("kind") == "pdf" else len(std.get("ocr", ""))
         return {"document_id": doc_id, "engine": engine, "pages_ocr": len(pages_text),
-                "chars": total_chars, "validated": ok, "flags": flags, "delivery_task": task_id}
+                "chars": total_chars, "validated": ok, "flags": flags, "delivery_task": task_id,
+                "split_parent": bool(std.get("parts_created"))}
 
 
 @app.get("/documents/{doc_id}/raw")
@@ -1121,7 +1133,7 @@ def get_raw(doc_id: str, b64: int = 0):
 def list_documents(limit: int = 50):
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT id,filename,mime,size,status,review_loop,created,updated "
-                    "FROM documents ORDER BY created DESC LIMIT %s", (limit,))
+                    "FROM documents WHERE status <> 'SPLIT_PARENT' ORDER BY created DESC LIMIT %s", (limit,))
         return {"documents": [dict(r) for r in cur.fetchall()]}
 
 
