@@ -497,7 +497,7 @@ Dari TEKS di bawah, hasilkan SATU objek JSON sesuai skema persis ini:
  "line_items": [{"description": "", "code": "", "qty": null, "uom": "", "unit_price": null, "amount": null, "page": null}],
  "handwritten": [{"content": "transkripsi verbatim", "interpreted": "makna jika jelas (tanggal, nopol, tanda tangan, LUNAS, paraf)", "page": null}],
  "payments": {"bank": "", "account": "", "account_name": ""},
- "confidence": "high|medium|low", "missing": ["field yang tidak ditemukan"], "notes": "hal yang meragukan + alasan pilihan angka ambigu"}
+ "confidence": "high|medium|low", "missing": ["field yang tidak ditemukan"], "notes": "hal yang meragukan + alasan pilihan angka ambigu", "others": "detail penting yang terlihat tetapi belum terwakili oleh field di atas; null jika tidak ada"}
 ATURAN:
 - Rupiah: "Rp 1.234.567,89" -> 1234567.89 (titik=ribuan, koma=desimal). Jika ambigu, pilih yang masuk akal secara pembukuan lalu turunkan confidence dan tulis di notes.
 - Nomor invoice bisa di mana saja: header (No./Faktur/Invoice), cap/stempel, coretan/lingkaran, tulisan tangan. Jika tidak eksplisit -> null dan daftarkan "invoice_number" di missing; JANGAN mengarang.
@@ -549,7 +549,8 @@ CLASSIFY_PROMPT = """Anda pengklasifikasi dokumen bisnis Indonesia. Dari potonga
  "issuer": "pihak penerbit/di kiri atas atau null",
  "recipient": "penerima addressed-to atau null",
  "amount": angka rupiah murni atau null,
- "notes": "1 kalimat: dasar klasifikasi; hal penting bila money_doc=false"
+ "notes": "1 kalimat: dasar klasifikasi; hal penting bila money_doc=false",
+ "others": "detail penting yang belum punya field terstruktur; null jika tidak ada"
 }
 Aturan: FAKTUR PENJUALAN/DELIVERY ORDER yang berisi barang+qty TERBIT PENJUAL = money_doc true (nanti di-map penuh).
 Bukti transfer/kwitansi/credit note = money_doc true. Work order/sales order/PO tanpa harga = false; jika ada nilai kontrak/tagihan, boleh true tetapi jangan mengarang invoice number. Kontrak/surat jalan/tanda terima tanpa harga/proposal/laporan = false.
@@ -583,17 +584,18 @@ def classify_document(std: dict, filename: str = "") -> dict:
 def profile_to_row(doc_id: str, filename: str, cls: dict):
     """Non-money document -> one light ledger row (identity only)."""
     sql = """INSERT INTO invoice_rows (document_id, filename, vendor_name, doc_type_label, invoice_number,
-        invoice_date, currency, total, notes, confidence, mapper_model, doc_class, money_doc, status)
-        VALUES (%s,%s,%s,%s,%s,NULLIF(%s,'')::date,NULL,NULLIF(%s,'')::numeric,%s,%s,%s,%s,false,'extracted')
+        invoice_date, currency, total, notes, others, confidence, mapper_model, doc_class, money_doc, status)
+        VALUES (%s,%s,%s,%s,%s,NULLIF(%s,'')::date,NULL,NULLIF(%s,'')::numeric,%s,%s,%s,%s,%s,false,'extracted')
         ON CONFLICT (document_id) DO UPDATE SET
           filename=EXCLUDED.filename, vendor_name=EXCLUDED.vendor_name, doc_type_label=EXCLUDED.doc_type_label,
           invoice_number=EXCLUDED.invoice_number, invoice_date=EXCLUDED.invoice_date, total=EXCLUDED.total,
-          notes=EXCLUDED.notes, confidence=EXCLUDED.confidence, mapper_model=EXCLUDED.mapper_model,
+          notes=EXCLUDED.notes, others=EXCLUDED.others, confidence=EXCLUDED.confidence, mapper_model=EXCLUDED.mapper_model,
           doc_class=EXCLUDED.doc_class, money_doc=false, updated_at=now()"""
     vals = (doc_id, filename, cls.get("issuer"), cls.get("title"), cls.get("number"),
             cls.get("date"), (cls.get("amount") if str(cls.get("amount") or "").strip() else None),
             ("penerima: %s. " % cls.get("recipient") if cls.get("recipient") else "") + (cls.get("notes") or "")[:400],
-            cls.get("confidence"), (cls.get("_classifier") or {}).get("model"), cls.get("class"))
+            (cls.get("others") or "")[:4000], cls.get("confidence"),
+            (cls.get("_classifier") or {}).get("model"), cls.get("class"))
     with db() as c, c.cursor() as cur:
         cur.execute(sql, vals)
 
@@ -602,6 +604,7 @@ def classify_and_route(doc_id: str, std: dict, filename: str, explicit_invoice: 
     """MAP_AUTO router: classify anything -> money docs full-map, others light-profile."""
     if explicit_invoice:
         std["mapped"] = map_std_to_table(std)
+        std["others"] = std["mapped"].get("others") or std["mapped"].get("notes")
         std["classified"] = {"class": (std["mapped"].get("invoice") or {}).get("doc_type_label") or "invoice",
                              "money_doc": True, "forced_by": "doc_type=invoice"}
         return
@@ -609,7 +612,10 @@ def classify_and_route(doc_id: str, std: dict, filename: str, explicit_invoice: 
     std["classified"] = cls
     if cls.get("money_doc"):
         std["mapped"] = map_std_to_table(std)
+        std["others"] = std["mapped"].get("others") or std["mapped"].get("notes")
     else:
+        std["others"] = cls.get("others") or cls.get("notes")
+        cls["others"] = std["others"]
         try:
             profile_to_row(doc_id, filename, cls)
             print("PROFILE-ROW", doc_id[:8], cls.get("class"), flush=True)
@@ -671,7 +677,7 @@ def upsert_invoice_row(doc_id, filename, std):
     cols = ["document_id","filename","vendor_name","vendor_npwp","vendor_address","doc_type_label",
             "invoice_number","invoice_number_source","invoice_number_confidence","invoice_date",
             "ref_po","currency","subtotal","tax","total","total_as_written","line_items","handwritten",
-            "confidence","missing","notes","mapper_model","doc_class"]
+            "confidence","missing","notes","others","mapper_model","doc_class"]
     vals = (doc_id, filename, ven.get("name"), ven.get("npwp"), ven.get("address"),
             inv.get("doc_type_label"), inv.get("number"), inv.get("number_source"),
             inv.get("number_confidence"), inv.get("date"),
@@ -679,6 +685,7 @@ def upsert_invoice_row(doc_id, filename, std):
             _num(amt.get("subtotal")), _num(amt.get("tax")), _num(amt.get("total")), amt.get("as_written"),
             json.dumps(m.get("line_items") or []), json.dumps(m.get("handwritten") or []),
             m.get("confidence"), ";".join(m.get("missing") or []), (m.get("notes") or "")[:1000],
+            (m.get("others") or std.get("others") or "")[:4000],
             (m.get("_mapper") or {}).get("model"),
             (std.get("classified") or {}).get("class") or inv.get("doc_type_label"))
     ph = ["%s"] * len(cols)
@@ -713,7 +720,7 @@ def invoices_csv(status: str = ""):
     import csv as _csv
     cols = ["document_id","filename","vendor_name","vendor_npwp","invoice_number","invoice_number_source",
             "invoice_date","ref_po","doc_type_label","currency","subtotal","tax","total","total_as_written",
-            "confidence","missing","rpa_vendor","rpa_invoice_number","rpa_date","rpa_total","rpa_status","rpa_note",
+            "confidence","missing","others","rpa_vendor","rpa_invoice_number","rpa_date","rpa_total","rpa_status","rpa_note",
             "status","mapped_at"]
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT * FROM invoice_rows" + (" WHERE status=%s" % status if status else "") + " ORDER BY id")
@@ -767,7 +774,7 @@ def mapped_csv(doc_id: str):
     cols = ["filename","document_id","vendor_name","vendor_npwp","vendor_address","invoice_number",
             "invoice_number_source","invoice_number_confidence","invoice_date","ref_po","doc_type_label",
             "subtotal","tax","total","as_written","line_item_count","handwritten_count",
-            "confidence","missing","notes"]
+            "confidence","missing","others","notes"]
     buf = io.StringIO()
     w = _csv.writer(buf)
     w.writerow(cols)
@@ -778,7 +785,8 @@ def mapped_csv(doc_id: str):
                 inv.get("date"), inv.get("ref_po"), inv.get("doc_type_label"),
                 amt.get("subtotal"), amt.get("tax"), amt.get("total"), amt.get("as_written"),
                 len(li), len(hw), m.get("confidence"),
-                ";".join(m.get("missing") or []), (m.get("notes") or "").replace("\n", " ")[:400]])
+                ";".join(m.get("missing") or []), (m.get("others") or std.get("others") or "").replace("\n", " ")[:4000],
+                (m.get("notes") or "").replace("\n", " ")[:400]])
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=mapped_{doc_id[:8]}.csv"})
 
