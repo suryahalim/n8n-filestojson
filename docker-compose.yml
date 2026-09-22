@@ -75,6 +75,9 @@ services:
     build: ./extractor
     container_name: dp-extractor
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - "100.68.212.36:5000:5000"
     environment:

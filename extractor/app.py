@@ -350,7 +350,7 @@ def _map_one_now(did: str):
         cur.execute("SELECT filename,standard_json FROM documents WHERE id=%s", (did,)); row = cur.fetchone()
     if not row: return
     std = dict(row["standard_json"] or {})
-    if std.get("mapped") or std.get("classified"): return
+    if (std.get("mapped") and not isinstance(std.get("mapped"), dict)) or std.get("classified"): return
     classify_and_route(did, std, row["filename"], explicit_invoice=False)
     task_id = None
     with db() as c, c.cursor() as cur:
@@ -380,7 +380,7 @@ def _auto_map_bg(doc_ids):
                 if not row:
                     continue
                 std = dict(row["standard_json"] or {})
-                if std.get("mapped") or std.get("classified") or std.get("parts_created"):
+                if (std.get("mapped") and not isinstance(std.get("mapped"), dict)) or std.get("classified") or std.get("parts_created"):
                     continue
                 children = _split_parent_if_needed(did, std, row["filename"])
                 if children:
@@ -394,9 +394,25 @@ def _auto_map_bg(doc_ids):
                     continue
                 classify_and_route(did, std, row["filename"],
                                    explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
+                mapping_error = isinstance(std.get("mapped"), dict) and bool(std["mapped"].get("error"))
+                env = {"schema_version": std.get("schema_version", "1.0"), "document_id": did,
+                       "filename": row["filename"], "extracted": std}
+                ok, flags = validate(env)
+                if mapping_error:
+                    ok = False
+                    flags = list(flags) + [{"rule": "mapping completed", "field": "mapped", "value": "error"}]
+                task_id = None
+                final_status = "VALIDATED" if ok else "FLAGGED"
                 with db() as c, c.cursor() as cur:
-                    cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
-                                (json.dumps(std), did))
+                    cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, status=%s, updated=now() WHERE id=%s",
+                                (json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}), final_status, did))
+                    if ok and not std.get("parts_created"):
+                        task_id = str(uuid.uuid4())
+                        cur.execute("INSERT INTO delivery_tasks(id,document_id,target_url,status) VALUES(%s,%s,%s,'QUEUED')",
+                                    (task_id, did, TARGET_API_URL))
+                    c.commit()
+                if task_id:
+                    publish("deliver", {"task_id": task_id, "document_id": did})
                 if std.get("mapped"):
                     try:
                         upsert_invoice_row(did, row["filename"], std)
@@ -404,7 +420,8 @@ def _auto_map_bg(doc_ids):
                         print("LEDGER upsert (digital) failed:", str(ue)[:150], flush=True)
                 print("AUTO-MAP(digital)", did[:8], "->",
                       (std.get("classified") or {}).get("class"),
-                      "mapped" if std.get("mapped") else "profile", flush=True)
+                      "mapped" if std.get("mapped") else "profile",
+                      "delivery=" + (task_id or "none"), flush=True)
             except Exception as e:
                 print("AUTO-MAP(digital)", did[:8], "FAILED:", str(e)[:200], flush=True)
     threading.Thread(target=worker, daemon=True).start()
@@ -443,6 +460,11 @@ def _recover_pending_bg():
                               ORDER BY created LIMIT 50""")
                 flagged = [r["id"] for r in cur.fetchall()]
                 cur.execute("""SELECT id FROM documents
+                              WHERE status='FLAGGED' AND standard_json IS NOT NULL
+                                AND standard_json ? 'ocr_engine'
+                              ORDER BY created LIMIT 50""")
+                map_pending = [r["id"] for r in cur.fetchall()]
+                cur.execute("""SELECT id FROM documents
                               WHERE status='VALIDATED' AND standard_json IS NOT NULL
                                 AND NOT (standard_json ? 'classified')
                               ORDER BY created LIMIT 50""")
@@ -450,6 +472,9 @@ def _recover_pending_bg():
             if os.environ.get("OCR_AUTO", "1") == "1" and flagged:
                 print("AUTO-RECOVER-OCR", len(flagged), flush=True)
                 _auto_ocr_bg(flagged)
+            if os.environ.get("MAP_AUTO", "1") == "1" and map_pending:
+                print("AUTO-RECOVER-MAP-PENDING", len(map_pending), flush=True)
+                _auto_map_bg(map_pending)
             if os.environ.get("MAP_AUTO", "1") == "1" and validated:
                 print("AUTO-RECOVER-MAP", len(validated), flush=True)
                 _auto_map_bg(validated)
@@ -691,12 +716,21 @@ def llm_text(prompt: str, cfg, max_tokens: int = 4000) -> str:
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
-    with ur.urlopen(req, timeout=int(os.environ.get("MAP_TIMEOUT", "600"))) as r:
-        d = json.load(r)
-    t = d["choices"][0]["message"]["content"]
-    if isinstance(t, list):
-        t = "\n".join(x.get("text", "") for x in t)
-    return t or ""
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            with ur.urlopen(req, timeout=int(os.environ.get("MAP_TIMEOUT", "120"))) as r:
+                d = json.load(r)
+            t = d["choices"][0]["message"]["content"]
+            if isinstance(t, list):
+                t = "\n".join(x.get("text", "") for x in t)
+            return t or ""
+        except Exception as e:
+            last_error = e
+            if attempt < 3:
+                print("LLM-MAP-RETRY", attempt, str(e)[:180], flush=True)
+                time.sleep(5 * attempt)
+    raise last_error
 
 
 def _parse_json_loose(txt: str):
@@ -743,7 +777,9 @@ def classify_document(std: dict, filename: str = "") -> dict:
     if not text.strip():
         return {"class": "lainnya", "money_doc": False, "confidence": "low", "error": "no text to classify"}
     prompt = CLASSIFY_PROMPT + f"\n\nNAMA FILE: {filename}\n\n=== POTONGAN TEKS ===\n" + text[:2500]
+    print("AUTO-CLASSIFY-START", filename, len(text), "chars", flush=True)
     raw = llm_text(prompt, load_ocr_config(), max_tokens=500)
+    print("AUTO-CLASSIFY-DONE", filename, flush=True)
     out = raw.strip()
     if out.startswith("```"):
         out = out.split("```")[1].strip().lstrip("json").strip()
@@ -821,8 +857,10 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
         text = std.get("ocr") or std.get("text") or ""
     if len(text.strip()) < 10:
         raise HTTPException(422, "nothing to map: document text still empty — run OCR first (engine=qwen)")
-    prompt = INVOICE_MAP_PROMPT + "\n\n=== TEKS DOKUMEN ===\n" + text[:14000]
-    raw = llm_text(prompt, cfg)
+    prompt = INVOICE_MAP_PROMPT + "\n\n=== TEKS DOKUMEN ===\n" + text[:10000]
+    print("AUTO-MAP-LLM-START", len(text), "chars", flush=True)
+    raw = llm_text(prompt, cfg, max_tokens=1800)
+    print("AUTO-MAP-LLM-DONE", flush=True)
     out = _parse_json_loose(raw)
     out["_mapper"] = {"model": cfg["model"], "source_chars": len(text)}
     return out
@@ -1113,6 +1151,10 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         env = {"schema_version": std.get("schema_version", "1.0"), "document_id": doc_id,
                "filename": d["filename"], "sha256": d["sha256"], "extracted": std}
         ok, flags = validate(env)
+        mapping_error = isinstance(std.get("mapped"), dict) and bool(std["mapped"].get("error"))
+        if mapping_error:
+            ok = False
+            flags = list(flags) + [{"rule": "mapping completed", "field": "mapped", "value": "error"}]
         deliverable = ok and not bool(std.get("parts_created"))
         final_status = "SPLIT_PARENT" if std.get("parts_created") else ("VALIDATED" if ok else "FLAGGED")
         cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, "
