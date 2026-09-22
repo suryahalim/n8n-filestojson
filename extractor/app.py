@@ -708,6 +708,16 @@ ATURAN:
 - Dokumen multi-halaman: fokus halaman header invoice & total; lampiran cukup diringkas.
 Keluarkan HANYA JSON, tanpa markdown, tanpa penjelasan."""
 
+TABLE_ITEMS_PROMPT = """Ekstrak SEMUA baris item tabel dari teks OCR berikut.
+Keluarkan hanya JSON object: {"line_items":[{"description":null,"code":null,"qty":null,"uom":null,"unit_price":null,"amount":null,"page":null}]}
+Aturan:
+- Ambil setiap baris barang yang benar-benar terbaca; jangan meringkas menjadi 'lain-lain'.
+- Pertahankan halaman sumber dari penanda HALAMAN.
+- Jangan menggabungkan item dari nomor SO/faktur berbeda.
+- Nilai yang tidak terbaca harus null; jangan mengarang.
+- Hanya baris item, jangan masukkan subtotal, pajak, total, header, atau catatan.
+Keluarkan HANYA JSON."""
+
 
 def llm_text(prompt: str, cfg, max_tokens: int = 4000) -> str:
     import urllib.request as ur
@@ -731,6 +741,23 @@ def llm_text(prompt: str, cfg, max_tokens: int = 4000) -> str:
                 print("LLM-MAP-RETRY", attempt, str(e)[:180], flush=True)
                 time.sleep(5 * attempt)
     raise last_error
+
+
+def _map_line_items_by_pages(std: dict, cfg: dict):
+    pages = std.get("pages") or []
+    if not pages:
+        return []
+    items = []
+    for start in range(0, len(pages), 3):
+        chunk = pages[start:start + 3]
+        text = "\n".join(f"--- HALAMAN {p.get('page', start+i+1)} ---\n{p.get('text','')}"
+                          for i, p in enumerate(chunk))
+        if len(text.strip()) < 10:
+            continue
+        raw = llm_text(TABLE_ITEMS_PROMPT + "\n\n=== TEKS OCR ===\n" + text[:14000], cfg, max_tokens=2200)
+        out = _parse_json_loose(raw)
+        items.extend(out.get("line_items") or [])
+    return items
 
 
 def _parse_json_loose(txt: str):
@@ -862,6 +889,14 @@ def map_std_to_table(std: dict, kind: str = "invoice") -> dict:
     raw = llm_text(prompt, cfg, max_tokens=1800)
     print("AUTO-MAP-LLM-DONE", flush=True)
     out = _parse_json_loose(raw)
+    if std.get("kind") == "pdf" and (std.get("pages") or []):
+        try:
+            page_items = _map_line_items_by_pages(std, cfg)
+            if page_items:
+                out["line_items"] = page_items
+                print("AUTO-MAP-LINE-ITEMS", len(page_items), "rows", flush=True)
+        except Exception as e:
+            print("AUTO-MAP-LINE-ITEMS-FAILED", str(e)[:180], flush=True)
     out["_mapper"] = {"model": cfg["model"], "source_chars": len(text)}
     return out
 
@@ -912,6 +947,33 @@ def upsert_invoice_row(doc_id, filename, std):
     assert len(vals) == len(cols), f"cols {len(cols)} vs vals {len(vals)}"
     with db() as c, c.cursor() as cur:
         cur.execute(sql, vals)
+        cur.execute("SELECT id FROM invoice_rows WHERE document_id=%s", (doc_id,))
+        header = cur.fetchone()
+        header_id = header[0] if header else None
+        cur.execute("DELETE FROM invoice_line_items WHERE document_id=%s", (doc_id,))
+        item_sql = """INSERT INTO invoice_line_items
+            (document_id, invoice_row_id, line_no, source_page, item_code,
+             description, quantity, uom, unit_price, amount, raw_item, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,now())
+            ON CONFLICT (document_id,line_no) DO UPDATE SET
+              invoice_row_id=EXCLUDED.invoice_row_id,
+              source_page=EXCLUDED.source_page, item_code=EXCLUDED.item_code,
+              description=EXCLUDED.description, quantity=EXCLUDED.quantity,
+              uom=EXCLUDED.uom, unit_price=EXCLUDED.unit_price,
+              amount=EXCLUDED.amount, raw_item=EXCLUDED.raw_item, updated_at=now()"""
+        for line_no, item in enumerate(m.get("line_items") or [], 1):
+            def _item_num(value):
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    return None
+                try:
+                    return float(str(value).replace(",", ""))
+                except Exception:
+                    return None
+            cur.execute(item_sql, (
+                doc_id, header_id, line_no, item.get("page"), item.get("code"),
+                item.get("description"), _item_num(item.get("qty")), item.get("uom"),
+                _item_num(item.get("unit_price")), _item_num(item.get("amount")),
+                json.dumps(item, ensure_ascii=False)))
     return True
 
 
@@ -924,6 +986,20 @@ def list_invoices(status: str = "", limit: int = 200):
             cur.execute("SELECT * FROM invoice_rows WHERE status=%s ORDER BY invoice_date NULLS LAST, id DESC LIMIT %s", (status, lim))
         else:
             cur.execute("SELECT * FROM invoice_rows ORDER BY id DESC LIMIT %s", (lim,))
+        rows = [dict(r) for r in cur.fetchall()]
+    return {"count": len(rows), "rows": rows}
+
+
+@app.get("/invoice-line-items")
+def list_invoice_line_items(document_id: str = "", limit: int = 2000):
+    """Normalized OCR table: one database row per mapped line item."""
+    lim = min(max(1, limit), 10000)
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if document_id:
+            cur.execute("SELECT * FROM invoice_line_items WHERE document_id=%s ORDER BY source_page NULLS LAST, line_no LIMIT %s",
+                        (document_id, lim))
+        else:
+            cur.execute("SELECT * FROM invoice_line_items ORDER BY document_id, source_page NULLS LAST, line_no LIMIT %s", (lim,))
         rows = [dict(r) for r in cur.fetchall()]
     return {"count": len(rows), "rows": rows}
 
