@@ -628,7 +628,7 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
-    with ur.urlopen(req, timeout=300) as r:
+    with ur.urlopen(req, timeout=120) as r:
         d = json.load(r)
     t = d["choices"][0]["message"]["content"]
     if isinstance(t, list):
@@ -1009,12 +1009,14 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                                    check=True, timeout=300)
                     pngs = sorted(glob.glob(prefix + "*.png"))
                     for i, pg in enumerate(pngs, 1):
+                        print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} START", flush=True)
                         if engine == "qwen":
                             with open(pg, "rb") as fh:
                                 txt = api_vision_ocr(fh.read(), ocr_cfg)
                         else:
                             txt = _tesseract(pg, lang)
                         pages_text.append({"page": i, "text": txt})
+                        print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} DONE", len(txt), "chars", flush=True)
                 std["kind"] = "pdf"
                 std["ocr_engine"] = engine
                 if engine == "qwen": std["ocr_model"] = ocr_cfg["model"]
