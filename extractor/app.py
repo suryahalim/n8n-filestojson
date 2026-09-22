@@ -637,8 +637,15 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
-    with ur.urlopen(req, timeout=120) as r:
-        d = json.load(r)
+    try:
+        with ur.urlopen(req, timeout=120) as r:
+            d = json.load(r)
+    except ur.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:500]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"OCR API HTTP {e.code}: {detail}") from e
     t = d["choices"][0]["message"]["content"]
     if isinstance(t, list):
         t = "\n".join(x.get("text", "") for x in t)
@@ -1019,11 +1026,23 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                     pngs = sorted(glob.glob(prefix + "*.png"))
                     for i, pg in enumerate(pngs, 1):
                         print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} START", flush=True)
-                        if engine == "qwen":
-                            with open(pg, "rb") as fh:
-                                txt = api_vision_ocr(fh.read(), ocr_cfg)
-                        else:
-                            txt = _tesseract(pg, lang)
+                        last_error = None
+                        for attempt in range(1, 4):
+                            try:
+                                if engine == "qwen":
+                                    with open(pg, "rb") as fh:
+                                        txt = api_vision_ocr(fh.read(), ocr_cfg)
+                                else:
+                                    txt = _tesseract(pg, lang)
+                                last_error = None
+                                break
+                            except Exception as e:
+                                last_error = e
+                                if attempt < 3:
+                                    print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} RETRY {attempt}", str(e)[:180], flush=True)
+                                    time.sleep(5 * attempt)
+                        if last_error is not None:
+                            raise last_error
                         pages_text.append({"page": i, "text": txt})
                         print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} DONE", len(txt), "chars", flush=True)
                 std["kind"] = "pdf"
