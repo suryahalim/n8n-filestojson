@@ -104,7 +104,7 @@ Every OCR'd document with `doc_type=invoice` is normalized into the **`invoice_r
 
 - Columns: extraction result (vendor*, invoice_number + source/confidence, invoice_date, ref_po, subtotal/tax/total NUMERIC, total_as_written, line_items/handwritten JSONB, **others** free text for important unmapped details, confidence, missing, notes, mapper_model) + RPA write-back columns (`rpa_vendor, rpa_invoice_number, rpa_date, rpa_total, rpa_note, rpa_status, rpa_reviewed_at`) + workflow `status`: `extracted → pending_review → mapped`.
 - RPA endpoints: `GET /invoices?status=extracted` (pull queue) · `PATCH /invoices/{document_id}` (claim / write final values) · `GET /invoices/export.csv` (includes `others`). RPA calls are pure Postgres — **zero LLM tokens**; only OCR and the mapping step consume the model.
-- **Schema policy (decided 2026-09-21):** schema lives ONLY in `db-init/*.sql` migrations — no DDL in app code. Fresh machine: postgres applies all db-init files automatically. **Existing DB created before a migration: apply it once manually**, e.g. `docker exec -i dp-db psql -U pipeline -d pipeline < db-init/04-add-others.sql`. Same rule for any future table change.
+- **Schema policy (decided 2026-09-21):** schema lives ONLY in `db-init/*.sql` migrations — no DDL in app code. Fresh machine: postgres applies all db-init files automatically. **Existing DB created before a migration: apply it once manually**, e.g. `docker exec -i dp-db psql -U pipeline -d pipeline < db-init/04-add-others.sql` and `05-document-parts.sql`. Same rule for any future table change.
 
 ### Multi-document PDF splitting
 
@@ -139,6 +139,6 @@ docker exec dp-db psql -U pipeline -d n8n -Atc "SELECT id,status FROM execution_
 
 ## Pointers
 - Operations & UI walkthrough: `USAGE.md` · UI test suite (U-series): `TESTING.md` · OCR-focused playbook (T1–T8): `OCR_TEST_PLAYBOOK.md`
-- MVP AR design: `MVP_AR_RECON_DESIGN.md` · Ten-document pilot: `MVP_10_DOCUMENT_TEST.md`
+- MVP AR design: `MVP_AR_RECON_DESIGN.md` · Ten-document pilot and mixed-PDF child test: `MVP_10_DOCUMENT_TEST.md` · Mixed-PDF live test: `TESTING.md` U13
 - Receiving contract: `TESTING.md` §4 · Real endpoint switch: set `TARGET_API_URL`
 - n8n workflows source of truth: `n8n/*.json` (keep committed copies in sync with live DB after every publish)

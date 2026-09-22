@@ -44,6 +44,37 @@ Use real business samples where permitted. Redact personal data only in a copy; 
 - `GET /invoices` and CSV export work without an OCR/model call.
 - Secret scan is clean.
 
+## Mixed-PDF / child-document test
+
+Upload one PDF through the n8n form with at least two clearly separated document types, for example:
+
+- pages 1–2: Purchase Order;
+- page 3: Delivery Order or Surat Jalan.
+
+Expected behavior:
+
+1. Parent PDF is retained as the audit source.
+2. A `document_parts` row is created for each detected page range.
+3. A child PDF and child document ID are created for every part.
+4. Each child is OCR'd/classified/mapped independently.
+5. The PO and delivery note produce separate ledger rows with separate `doc_class` values.
+6. A scanned child is OCR'd before classification.
+7. An unclear boundary or child goes to review; it is not forced into an invoice.
+8. `GET /documents/{parent_id}` returns the child list under `parts`.
+9. `others` is checked separately for every child.
+
+Acceptance SQL:
+
+```sql
+SELECT parent_document_id, child_document_id, page_start, page_end,
+       detected_class, status
+FROM document_parts
+WHERE parent_document_id = '<parent_id>'
+ORDER BY page_start;
+```
+
+The splitter is deliberately conservative: a multi-page document with one type remains one child. It currently uses clear document headers/page text; ambiguous packets must be reviewed rather than silently split.
+
 ## Pilot evidence to record
 
 - upload batch response;

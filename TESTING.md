@@ -75,6 +75,30 @@ n8n → **Executions**: every form submission (single and batch) = one row with 
 ### U10 · Staff simulation — acceptance run (10 min, phone only)
 U1 → U2 → U3 → U4 → U7 in one sitting, only Form + /view + Swagger. Green = the system is usable by IT staff with no terminal.
 
+### U13 · Mixed PDF → child documents — PASS ✅
+Create/upload one packet PDF containing the 2-page `PO-2026-8412.pdf` followed by the first page of `SCAN-delivery-note-DN-991.pdf`, with form type `Other`.
+
+Expected sequence:
+
+1. Packet is `FLAGGED` because one page has no text layer.
+2. Auto-OCR runs before splitting.
+3. Parent becomes `document_scope=multiple`.
+4. `document_parts` contains page ranges `1–2` and `3–3`.
+5. Child 1 is classified `purchase_order`, mapped, and has total `1347873000`.
+6. Child 2 is classified `delivery_order`, mapped independently, and does not inherit the PO total.
+7. Both child rows have their own `others` value where applicable.
+8. `GET /documents/{parent_id}` exposes the children under `parts`.
+
+Verify with:
+
+```bash
+PARENT=<parent_id>
+docker exec dp-db psql -U pipeline -d pipeline -c \
+  "SELECT page_start,page_end,child_document_id,detected_class,status FROM document_parts WHERE parent_document_id='$PARENT' ORDER BY page_start;"
+```
+
+A packet with unclear page boundaries must not be silently converted into one invoice; it remains one document and requires review.
+
 ---
 
 ## 3. Code test cases (no browser — regression suite)
@@ -139,7 +163,8 @@ Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re
 2. **PDF tables arrive as line text**, not cell-structured rows (xlsx does have real rows/cols). (Planned: pdfplumber pass.)
 3. Receiving **inbox view is in-memory** (last 20, cleared on restart); the DB trail in `/view` is permanent.
 4. Batch form = one doc_type/notes per submission (per-file metadata needs the API).
-5. `TARGET_API_URL` is still the mock until a real endpoint is set in compose.
+5. Typed domain tables are not yet separate; child documents currently map to the shared `invoice_rows` ledger and are distinguished by `doc_class`.
+6. `TARGET_API_URL` is still the mock until a real endpoint is set in compose.
 
 ## 8. FAQ while testing
 
