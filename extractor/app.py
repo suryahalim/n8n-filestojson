@@ -4,7 +4,7 @@ Validation pass: publish to Service Bus (RabbitMQ exchange 'doc_pipeline',
 routing key 'job.deliver') + commit delivery task row (transaction with job DONE).
 Validation fail: flag fields + notify n8n review webhook (the loop back).
 Also hosts /mock/receiving as stand-in downstream system."""
-import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request
+import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request, asyncio
 import time
 import threading
 import subprocess, tempfile
@@ -84,6 +84,9 @@ def validate(env: dict):
         if len(text_all.strip()) < 20:
             flags.append({"field": "extracted.pages.text", "value": "near-empty",
                           "rule": "min 20 chars (scanned/blank pdf? needs OCR)"})
+        elif len(ext.get("pages", [])) > 1 and any(len((p.get("text") or "").strip()) < 20 for p in ext.get("pages", [])):
+            flags.append({"field": "extracted.pages.text", "value": "one-or-more-pages-near-empty",
+                          "rule": "multi-page PDF has a page needing OCR before classification/splitting"})
     if ext["kind"] == "xlsx":
         if not ext.get("sheets"):
             flags.append({"field": "extracted.sheets", "rule": "at least one sheet"})
@@ -242,6 +245,120 @@ async def upload(request: Request,
     return result
 
 
+
+
+def _page_label(text: str):
+    """Conservative page-header detector used before child-document mapping."""
+    t = (text or "").lower()
+    labels = [
+        ("invoice", ("invoice", "faktur penjualan", "faktur pajak")),
+        ("purchase_order", ("purchase order", "purchase order no", "po no")),
+        ("sales_order", ("sales order", "so no")),
+        ("delivery_order", ("delivery order", "delivery note", "surat jalan")),
+        ("tanda_terima", ("tanda terima", "goods received", "diterima oleh")),
+        ("bukti_transfer", ("bukti transfer", "transfer berhasil", "transaction reference")),
+        ("kwitansi", ("kwitansi", "receipt no")),
+        ("work_order", ("work order", "work order no")),
+        ("kontrak", ("perjanjian", "kontrak", "agreement")),
+    ]
+    hits = [(label, min(t.find(k) for k in keys if k in t))
+            for label, keys in labels if any(k in t for k in keys)]
+    return min(hits, key=lambda x: x[1])[0] if hits else None
+
+
+def _detect_pdf_parts(std: dict):
+    """Return conservative page ranges only when distinct document headers occur.
+    Multi-page documents of one type remain one part; uncertain boundaries are not split."""
+    pages = std.get("pages") or []
+    markers = [(p.get("page", i + 1), _page_label(p.get("text", "")))
+               for i, p in enumerate(pages)]
+    markers = [(p, k) for p, k in markers if k]
+    if len({k for _, k in markers}) < 2:
+        return []
+    starts = []
+    seen = set()
+    for page, label in markers:
+        if label not in seen:
+            starts.append((page, label)); seen.add(label)
+    if len(starts) < 2:
+        return []
+    ranges = []
+    for i, (start, label) in enumerate(starts):
+        end = starts[i + 1][0] - 1 if i + 1 < len(starts) else len(pages)
+        if end >= start:
+            ranges.append({"page_start": start, "page_end": end, "detected_class": label,
+                           "confidence": "medium"})
+    return ranges if len(ranges) > 1 else []
+
+
+def _create_child_pdf(parent: dict, raw: bytes, part: dict):
+    """Create a child document without publishing it before child mapping."""
+    from pypdf import PdfReader, PdfWriter
+    reader = PdfReader(io.BytesIO(raw)); writer = PdfWriter()
+    for idx in range(part["page_start"] - 1, part["page_end"]):
+        writer.add_page(reader.pages[idx])
+    out = io.BytesIO(); writer.write(out); child_raw = out.getvalue()
+    sha = hashlib.sha256(child_raw).hexdigest()
+    child_id = uuid.uuid4().hex
+    filename = f"{Path(parent['filename']).stem}_p{part['page_start']}-{part['page_end']}.pdf"
+    stored = UPLOAD_DIR / f"{sha[:16]}.pdf"; stored.write_bytes(child_raw)
+    mime = "application/pdf"
+    std = extract_pdf(child_raw)
+    std.update({"schema_version": "1.0", "document_id": child_id, "filename": filename,
+                "sha256": sha, "uploaded_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "doc_type": "other", "notes": "child document split from parent",
+                "parent_document_id": parent["id"], "page_start": part["page_start"],
+                "page_end": part["page_end"], "is_child": True})
+    ok, flags = validate({"schema_version": "1.0", "document_id": child_id,
+                          "filename": filename, "sha256": sha, "extracted": std})
+    status = "VALIDATED" if ok else "FLAGGED"
+    with db() as c, c.cursor() as cur:
+        cur.execute("INSERT INTO documents(id,filename,sha256,mime,size,stored_path,status,standard_json,validation,parent_document_id,page_start,page_end) VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
+                    (child_id, filename, sha, mime, len(child_raw), str(stored), status,
+                     json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}),
+                     parent["id"], part["page_start"], part["page_end"]))
+        cur.execute("INSERT INTO document_parts(parent_document_id,child_document_id,page_start,page_end,detected_class,confidence) VALUES(%s,%s,%s,%s,%s,%s)",
+                    (parent["id"], child_id, part["page_start"], part["page_end"],
+                     part["detected_class"], part["confidence"]))
+        c.commit()
+    return child_id
+
+
+def _split_parent_if_needed(did: str, std: dict, filename: str):
+    if std.get("is_child") or std.get("parts_created") or std.get("kind") != "pdf":
+        return []
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT id,filename,stored_path FROM documents WHERE id=%s", (did,)); parent = cur.fetchone()
+    if not parent or not os.path.exists(parent["stored_path"]):
+        return []
+    parts = _detect_pdf_parts(std)
+    if len(parts) < 2:
+        return []
+    raw = Path(parent["stored_path"]).read_bytes()
+    children = [_create_child_pdf(parent, raw, p) for p in parts]
+    std["parts_created"] = True
+    std["document_scope"] = "multiple"
+    std["parts"] = [{**p, "child_document_id": cid} for p, cid in zip(parts, children)]
+    with db() as c, c.cursor() as cur:
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s", (json.dumps(std), did)); c.commit()
+    print("SPLIT", did[:8], "->", len(children), "children", flush=True)
+    return children
+
+
+def _map_one_now(did: str):
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT filename,standard_json FROM documents WHERE id=%s", (did,)); row = cur.fetchone()
+    if not row: return
+    std = dict(row["standard_json"] or {})
+    if std.get("mapped") or std.get("classified"): return
+    classify_and_route(did, std, row["filename"], explicit_invoice=False)
+    with db() as c, c.cursor() as cur:
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, status='VALIDATED', updated=now() WHERE id=%s", (json.dumps(std), did)); c.commit()
+    if std.get("mapped"):
+        upsert_invoice_row(did, row["filename"], std)
+    print("AUTO-MAP(child)", did[:8], "->", (std.get("classified") or {}).get("class"), flush=True)
+
+
 def _auto_map_bg(doc_ids):
     """Digital PDFs (text layer OK -> VALIDATED, skip OCR) still deserve the map:
     classify -> (full map if money_doc | light profile) -> ledger. Runs in bg thread."""
@@ -254,7 +371,17 @@ def _auto_map_bg(doc_ids):
                 if not row:
                     continue
                 std = dict(row["standard_json"] or {})
-                if std.get("mapped") or std.get("classified"):
+                if std.get("mapped") or std.get("classified") or std.get("parts_created"):
+                    continue
+                children = _split_parent_if_needed(did, std, row["filename"])
+                if children:
+                    valid_children, flagged_children = [], []
+                    with db() as c, c.cursor() as cur:
+                        for child_id in children:
+                            cur.execute("SELECT status FROM documents WHERE id=%s", (child_id,))
+                            (flagged_children if (cur.fetchone() or [""])[0] == "FLAGGED" else valid_children).append(child_id)
+                    for child_id in valid_children: _map_one_now(child_id)
+                    if flagged_children: _auto_ocr_bg(flagged_children)
                     continue
                 classify_and_route(did, std, row["filename"],
                                    explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
@@ -896,8 +1023,19 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         # Auto-map: invoice docs get the normalized vendor-table row as part of OCR.
         if os.environ.get("MAP_AUTO", "1") == "1":
             try:
-                classify_and_route(doc_id, std, d["filename"],
-                                   explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
+                children = _split_parent_if_needed(doc_id, std, d["filename"])
+                if children:
+                    print("AUTO-SPLIT", doc_id[:8], "children:", len(children), flush=True)
+                    valid_children, flagged_children = [], []
+                    with db() as c2, c2.cursor() as cur2:
+                        for child_id in children:
+                            cur2.execute("SELECT status FROM documents WHERE id=%s", (child_id,))
+                            (flagged_children if (cur2.fetchone() or [""])[0] == "FLAGGED" else valid_children).append(child_id)
+                    for child_id in valid_children: _map_one_now(child_id)
+                    if flagged_children: _auto_ocr_bg(flagged_children)
+                else:
+                    classify_and_route(doc_id, std, d["filename"],
+                                       explicit_invoice=(std.get("doc_type") or "").lower() == "invoice")
                 if std.get("mapped"):
                     try:
                         upsert_invoice_row(doc_id, d["filename"], std)
@@ -963,6 +1101,8 @@ def get_document(doc_id: str):
         d["jobs"] = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT id,status,attempts,last_error,delivered_at,target_url FROM delivery_tasks WHERE document_id=%s", (doc_id,))
         d["delivery_tasks"] = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT child_document_id,page_start,page_end,detected_class,confidence,status FROM document_parts WHERE parent_document_id=%s ORDER BY page_start", (doc_id,))
+        d["parts"] = [dict(r) for r in cur.fetchall()]
     return d
 
 
