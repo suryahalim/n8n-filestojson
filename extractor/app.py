@@ -10,6 +10,7 @@ import threading
 import subprocess, tempfile
 import logging
 log = logging.getLogger("extractor")
+from contextlib import contextmanager
 from pathlib import Path
 import psycopg2, psycopg2.extras
 from fastapi.responses import FileResponse
@@ -28,8 +29,17 @@ app = FastAPI(title="doc-pipeline extractor")
 psycopg2.extras.register_default_jsonb(loads=json.loads)
 
 
+@contextmanager
 def db():
-    return psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
