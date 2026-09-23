@@ -89,6 +89,7 @@ services:
       - INGEST_ALLOW_DUP=${INGEST_ALLOW_DUP:-0}
       - OCR_MAX_PAGES=${OCR_MAX_PAGES:-0}
       - OCR_AUTO=${OCR_AUTO:-1}
+      - OCR_WORKERS=${OCR_WORKERS:-4}
       - MAP_AUTO=${MAP_AUTO:-0}
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
