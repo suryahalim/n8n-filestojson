@@ -658,7 +658,7 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
         "model": cfg["model"], "max_tokens": 1800,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()}},
-            {"type": "text", "text": "Extract ALL text from this document image exactly as written, preserving line structure. Include printed AND handwritten content. Output only the text."}]}]}).encode()
+            {"type": "text", "text": "Extract ALL text from this document image exactly as written, preserving the document's visual reading order and table row/column structure. This is a Faktur Penjualan: preserve headers and every line-item field, including Harga, Disc 1, Disc 2, Disc 3, Disc 4, Disc 5, Jumlah, subtotal, DPP, PPN, and TOTAL. Include printed AND handwritten content. Transcribe handwritten numbers verbatim; do not normalize, autocorrect, infer, or replace digits. In particular, do not change a handwritten 366000 into 266000. If a character is genuinely unreadable, write [unclear] rather than guessing. Output only the transcription."}]}]}).encode()
     req = ur.Request(cfg["endpoint"], data=body, method="POST")
     req.add_header("Authorization", "Bearer " + cfg["key"])
     req.add_header("Content-Type", "application/json")
@@ -678,6 +678,55 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
 
 # backwards-compat alias (older code paths)
 qwen_vision_ocr = api_vision_ocr
+
+
+def _sanitize_ocr_text(text: str) -> str:
+    """Reject model hallucination on blank/near-blank pages."""
+    text = (text or "").strip()
+    if not text:
+        return "[BLANK_PAGE]"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    uncertain = sum(1 for line in lines if line.lower() in {"[unclear]", "unclear", "[unknown]"})
+    meaningful = " ".join(line for line in lines if line.lower() not in {"[unclear]", "unclear", "[unknown]"})
+    if uncertain >= 5 and len(meaningful) < 180:
+        return "[BLANK_OR_UNREADABLE_PAGE]"
+    return text
+
+
+def api_numeric_verify(png_bytes: bytes, ocr_text: str, cfg=None) -> dict:
+    """Second-pass numeric verification against the page image."""
+    import urllib.request as ur
+    cfg = cfg or load_ocr_config()
+    prompt = """You are a strict numeric verifier for an Indonesian Faktur Penjualan.
+Compare the page image against the OCR transcription below. Return JSON only:
+{"status":"PASS|REVIEW", "numbers":[{"label":"", "value_as_seen":"", "confidence":"high|medium|low", "handwritten":false}], "line_items":[{"code":"", "qty":"", "unit_price":"", "disc_1":"", "disc_2":"", "disc_3":"", "disc_4":"", "disc_5":"", "amount":""}], "totals":{"subtotal":"", "dpp":"", "ppn":"", "total":""}, "arithmetic":{"status":"PASS|FAIL|NOT_CHECKED", "notes":""}, "discrepancies":["..."]}
+Rules:
+- Inspect the image, not only the OCR text.
+- Copy digits exactly as visible; do not autocorrect or infer.
+- Preserve Indonesian separators and leading zeros.
+- For handwritten digits, use confidence=low and status=REVIEW if any digit is uncertain; never substitute a plausible digit.
+- Include every visible line item and every Disc 1 through Disc 5 field.
+- If the page is blank or has no financial table, return status PASS, empty numbers and line_items, and arithmetic NOT_CHECKED.
+- Mark REVIEW for any OCR/image mismatch, missing numeric field, or arithmetic inconsistency.
+
+OCR TRANSCRIPTION:
+""" + (ocr_text or "")
+    body = json.dumps({
+        "model": cfg["model"], "max_tokens": 3000,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()}},
+            {"type": "text", "text": prompt}
+        ]}]
+    }).encode()
+    req = ur.Request(cfg["endpoint"], data=body, method="POST")
+    req.add_header("Authorization", "Bearer " + cfg["key"])
+    req.add_header("Content-Type", "application/json")
+    with ur.urlopen(req, timeout=180) as r:
+        d = json.load(r)
+    t = d["choices"][0]["message"]["content"]
+    if isinstance(t, list):
+        t = "\n".join(x.get("text", "") for x in t)
+    return _parse_json_loose(t)
 
 
 def _tesseract(png_path: str, lang: str = "eng") -> str:
@@ -1186,7 +1235,7 @@ async def map_doc(doc_id: str, request: Request):
 
 
 @app.post("/documents/{doc_id}/ocr")
-def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
+def run_ocr(doc_id: str, lang: str = "eng", engine: str = "", max_pages: int = 0, dpi: int = 0, start_page: int = 1):
     """OCR the STORED original (pdf-scan or image), merge into standard_json,
     re-validate; on pass publish delivery like /correct.
     engine: 'qwen' (default, API — qwen3.8-flash via QWEN_MODEL) or 'tesseract' (local)."""
@@ -1202,32 +1251,55 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         mime = d["mime"]
         std = dict(d["standard_json"] or {})
         pages_text = []
+        total_pages = 1
         ocr_cfg = load_ocr_config() if engine == "qwen" else None
         if engine == "qwen" and not ocr_cfg.get("key"):
             raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
         try:
             if mime == "application/pdf":
                 info = subprocess.run(["pdfinfo", path], capture_output=True, text=True).stdout
-                n = OCR_MAX_PAGES
+                start_page = max(1, int(start_page))
+                requested_pages = max_pages if max_pages > 0 else OCR_MAX_PAGES
+                total_pages = 0
                 for ln in info.splitlines():
                     if ln.startswith("Pages"):
                         total_pages = int(ln.split(":")[-1].strip())
-                        n = total_pages if OCR_MAX_PAGES <= 0 else min(OCR_MAX_PAGES, total_pages)
+                        break
+                if total_pages <= 0:
+                    raise RuntimeError("PDF page count unavailable")
+                if start_page > total_pages:
+                    raise HTTPException(400, f"start_page {start_page} exceeds total pages {total_pages}")
+                if requested_pages <= 0:
+                    requested_pages = total_pages - start_page + 1
+                end_page = min(total_pages, start_page + requested_pages - 1)
                 with tempfile.TemporaryDirectory() as td:
                     prefix = os.path.join(td, "pg")
-                    subprocess.run(["pdftoppm", "-png", "-r", OCR_DPI, "-f", "1", "-l", str(n), path, prefix],
+                    render_dpi = dpi if dpi > 0 else int(OCR_DPI)
+                    subprocess.run(["pdftoppm", "-png", "-r", str(render_dpi), "-f", str(start_page), "-l", str(end_page), path, prefix],
                                    check=True, timeout=300)
-                    pngs = sorted(glob.glob(prefix + "*.png"))
-                    for i, pg in enumerate(pngs, 1):
+                    pngs = sorted(
+                        glob.glob(prefix + "*.png"),
+                        key=lambda p: int(os.path.basename(p).rsplit("-", 1)[-1].split(".", 1)[0])
+                    )
+                    for i, pg in enumerate(pngs, start_page):
                         print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{len(pngs)} START", flush=True)
                         last_error = None
+                        verification = None
                         for attempt in range(1, 4):
                             try:
                                 if engine == "qwen":
                                     with open(pg, "rb") as fh:
-                                        txt = api_vision_ocr(fh.read(), ocr_cfg)
+                                        png_bytes = fh.read()
+                                    txt = api_vision_ocr(png_bytes, ocr_cfg)
                                 else:
+                                    png_bytes = None
                                     txt = _tesseract(pg, lang)
+                                txt = _sanitize_ocr_text(txt)
+                                if engine == "qwen" and not txt.startswith("[BLANK"):
+                                    try:
+                                        verification = api_numeric_verify(png_bytes, txt, ocr_cfg)
+                                    except Exception as ve:
+                                        verification = {"status": "REVIEW", "discrepancies": ["numeric verification failed: " + str(ve)[:180]]}
                                 last_error = None
                                 break
                             except Exception as e:
@@ -1237,7 +1309,7 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                                     time.sleep(5 * attempt)
                         if last_error is not None:
                             raise last_error
-                        pages_text.append({"page": i, "text": txt})
+                        pages_text.append({"page": i, "text": txt, "numeric_verification": verification})
                         progress_std = dict(std)
                         progress_std["kind"] = "pdf"
                         progress_std["ocr_engine"] = engine
@@ -1246,7 +1318,9 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
                         progress_std["pages"] = list(pages_text)
                         progress_std["ocr_progress"] = {
                             "status": "RUNNING", "completed_pages": i,
-                            "total_pages": len(pngs), "completed_chars": sum(len(p["text"]) for p in pages_text),
+                            "total_pages": total_pages, "completed_chars": sum(len(p["text"]) for p in pages_text),
+                            "numeric_verified_pages": sum(1 for p in pages_text if (p.get("numeric_verification") or {}).get("status") == "PASS"),
+                            "numeric_review_pages": sum(1 for p in pages_text if (p.get("numeric_verification") or {}).get("status") == "REVIEW"),
                             "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
                         }
                         cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
@@ -1277,24 +1351,33 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = ""):
         # of native-text-layer vs OCR result per page.
         prev_was_ocr = bool(std.get("ocr_engine"))
         if std.get("kind") == "pdf":
-            merged = []
-            base_pages = {p["page"]: p.get("text", "") for p in std.get("pages", [])}
+            base_pages = {int(p["page"]): dict(p) for p in std.get("pages", [])}
             for p in pages_text:
-                t = base_pages.get(p["page"], "")
+                page_no = int(p["page"])
+                existing = base_pages.get(page_no, {})
+                t = existing.get("text", "")
                 if prev_was_ocr:
                     keep = p["text"].strip()
                 else:
                     keep = (t + "\n" + p["text"]).strip() if len(t.strip()) < len(p["text"].strip()) else t.strip()
-                merged.append({"page": p["page"], "text": keep})
-            std["pages"] = merged
-            std["page_count"] = max(std.get("page_count", 0), len(merged))
+                merged_page = {"page": page_no, "text": keep}
+                if "numeric_verification" in p:
+                    merged_page["numeric_verification"] = p["numeric_verification"]
+                base_pages[page_no] = merged_page
+            std["pages"] = [base_pages[k] for k in sorted(base_pages)]
+            std["page_count"] = max(std.get("page_count", 0), total_pages)
         else:
             std["ocr"] = pages_text[0]["text"]
 
+        full_document_run = start_page == 1 and len(pages_text) == total_pages
+        numeric_statuses = [p.get("numeric_verification") or {} for p in pages_text]
         std["ocr_progress"] = {
-            "status": "COMPLETED", "completed_pages": len(pages_text),
-            "total_pages": len(pages_text),
+            "status": "COMPLETED" if full_document_run else "PARTIAL",
+            "completed_pages": len(pages_text),
+            "total_pages": total_pages,
             "completed_chars": sum(len(p.get("text", "")) for p in pages_text),
+            "numeric_verified_pages": sum(1 for v in numeric_statuses if v.get("status") == "PASS"),
+            "numeric_review_pages": sum(1 for v in numeric_statuses if v.get("status") == "REVIEW"),
             "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
         }
 
