@@ -29,6 +29,10 @@ def classify(t):
         return 'RJ_TIPTOP'
     if 'RECEIVING NOTE' in u and 'BUDI' in u:
         return 'RJ_BUDI'
+    if 'RECEIVING MEMO' in u and '.PL.' in u:
+        return 'RJ_MEMO'
+    if 'GOOD RECEIPT SLIP' in u:
+        return 'GR_SLIP'
     if re.search(r'\bGOOD RECEIPT\b', u):
         return 'GR_BOOTS'
     if 'FAKTUR PAJAK' in u and not re.search(r'PURCHASE ORDER|WITH PURCHASE ORDER', u) \
@@ -44,31 +48,40 @@ def _numbers(lines):
     return [l.strip() for l in lines if re.fullmatch(r'-?[\d.,]{1,20}%?', l.strip())]
 
 def po_boots_vertical(t, page):
-    """PANEN SELARAS (Boots/Farmers): item blocks start at line `00010`."""
+    """PANEN SELARAS (Boots/Farmers): item blocks start at line `00010`.
+    Layout per block: sku / barcode / description / [Country..] / qty / UOM / d1 d2 d3 / [PurcPrice] / UntPrice / Total."""
     po = g(t, r'Purchase Order\s*\n\s*([A-Z0-9./-]+)') or g(t, r'P\.O No\s*:\s*([^\n]+)')
     vendor = g(t, r'Purchase Order\s*\n\s*[A-Z0-9./-]+\s*\n\s*([^\n]+)')
     rows = []
     lines = t.splitlines()
     idxs = [i for i, l in enumerate(lines) if re.fullmatch(r'0{2,4}\d{1,4}', l.strip()) and int(l.strip()) % 10 == 0 and int(l.strip()) > 0]
     for k, i in enumerate(idxs):
-        end = idxs[k+1] if k+1 < len(idxs) else len(lines)
-        block = [l.strip() for l in lines[i+1:end] if l.strip()]
-        nums = _numbers(block)
-        desc = next((b for b in block if re.match(r'^[A-Z][A-Z0-9/&\' +.-]{6,}$', b)
-                     and not b.startswith('Country')), '')
-        sku = next((b for b in block if re.fullmatch(r'[A-Z0-9]{8,16}', b) and not b.isdigit()), '')
-        uom = next((b for b in block if re.fullmatch(r'[A-Z]{1,4}', b) and b not in ('HL',)), '')
-        # layout: qty,uom,[disc x3],price[,purc],total  (PO=8 nums, GR=6 nums)
-        if len(nums) >= 6:
+        end_i = idxs[k+1] if k+1 < len(idxs) else len(lines)
+        block = [l.strip() for l in lines[i+1:end_i] if l.strip()]
+        sku = next((b for b in block if re.fullmatch(r'[A-Z0-9]{10,16}', b) and not b.isdigit() and re.search(r'[A-Z]', b)), '')
+        desc = next((b for b in block if re.match(r'^[A-Z][A-Z0-9/&\' .+-]{5,}\s+\S', b) and 'Country' not in b and b != sku and not b.isdigit()), '')
+        uom_pos = next((j for j, b in enumerate(block) if re.fullmatch(r'[A-Z]{1,4}', b) and b not in ('HL', 'PT', 'TBK') and not re.fullmatch(r'[A-Z]\d{9,15}', b)), None)
+        if uom_pos is None or uom_pos == 0:
+            continue
+        qty = re.sub(r'[.,]0+$', '', block[uom_pos-1]) if re.fullmatch(r'[\d.,]+', block[uom_pos-1]) else ''
+        if not qty:
+            continue
+        tail = _block_numbers(block[uom_pos+1:], 10)
+        d = [x for x in tail[:3] if x == '0']
+        total = tail[-1] if tail else ''
+        def _val(v):
             try:
-                qty = nums[0]
-                if len(nums) >= 8:
-                    d = nums[1:4]; price = nums[6]; total = nums[7]
-                else:
-                    d = nums[1:4]; price = nums[4]; total = nums[5]
+                return float(re.sub(r'[.,](?=\d{3}\b)|[.,](?=\d{3}$)', '', v)) if len(v.replace(',','').replace('.','')) > 3 else float(v.replace(',', '.'))
             except Exception:
-                continue
-            rows.append([po, vendor, '', (sku + ' ' + desc).strip(), qty, uom, price, ','.join(d), total, page, 'OCR_ITEM'])
+                return None
+        qv, tv = _val(qty), _val(total)
+        price = tail[-2]
+        for cand in (tail[-3], tail[-2]) if len(tail) >= 3 else (tail[-2],):
+            pv = _val(cand)
+            if qv and tv and pv and abs(qv * pv - tv) / max(tv, 1) < 0.02:
+                price = cand
+                break
+        rows.append([po, vendor, '', (sku + ' ' + desc).strip(), qty, block[uom_pos], price, ','.join(d), total, page, 'OCR_ITEM'])
     return rows
 
 def po_farmers_horizontal(t, page):
@@ -153,10 +166,12 @@ def po_dfj_horizontal(t, page):
     vendor = g(t, r'\d{5,6}\s+(SARANA[^\n]+)')
     rows = []
     for line in t.splitlines():
-        m = re.match(r'^\s*(\d{1,2})\s+(\d{5,}(?:\(\d{12,14}\))?)\s+(.+?)\s+[YN]\s+[YN]\s+(\d[\d.,]*)\s+(CT|PAC|BGN|KRK|BOX)\s+\d+\s*x\s*\d+\s+(\d[\d.,]*)\s*EA\s+(\d+)\s+([\d.,]+)\s+(?:[\d.]+%\s+)+([\d.,]+)\s+([\d.,]+)\s*$', line)
+        m = re.match(r'^\s*(\d{1,2})\s+(\d{5,}(?:\(?\d{12,14}\)?)?)\s+(.+?)\s*(?:[YN]\s+[YN]\s+)?(\d[\d.,]*)\s+(CT|PAC|BGN|KRK|BOX)\s+\d+\s*x\s*\d+\s+(\d[\d.,]*)\s*EA\s+(\d+)\s+([\d.,]+)\s+((?:[\d.,]+%\s+)+)([\d.,]+)\s+([\d.,]+)\s*$', line)
         if m:
-            idx, plu, desc, qty, uom, sat, pallet, unit, gross, slp = m.groups()
-            rows.append([po, vendor, '', (plu + ' ' + desc).strip(), qty, uom, unit, '', slp, page, 'OCR_ITEM'])
+            idx, plu, desc, qty, uom, sat, pallet, unit, pcts, gross, slp = m.groups()
+            if len(plu) > 9:
+                plu, _bc = plu[:7], plu[7:]
+            rows.append([po, vendor, '', (plu + ' ' + desc).strip(), qty, uom, unit, ' '.join(pcts.split()[:2]), slp, page, 'OCR_ITEM'])
     return rows
 
 def po_boots_inline(t, page):
@@ -239,7 +254,16 @@ def po_dfj_inline(t, page):
     return rows
 
 def _block_numbers(block, n):
-    return [b for b in block if re.fullmatch(r'-?[\d.,]+', b)][:n]
+    out = []
+    for b in block:
+        if re.fullmatch(r'[\d.,]+', b):
+            # skip pure-digit long numbers (barcodes), they are not quantities
+            if re.fullmatch(r'\d{9,}', b):
+                continue
+            out.append(b.rstrip('.,'))
+            if len(out) >= n:
+                break
+    return out
 
 def po_primafood(t, page):
     """PrimaFood: vertical block idx / SKU(8) / desc / pack / qty / price / d1-d4 / total."""
@@ -295,6 +319,74 @@ def po_tiptop(t, page):
             rows.append([po, vendor, '', (code + ' ' + desc + ' ' + size).strip(), qty, 'CTN', price, '', total, page, 'OCR_ITEM'])
     return rows
 
+def po_primafood_pipe(t, page):
+    """PrimaFood pipe-table variant: No | SKU | Barcode | Desc | UOM | Qty | Harga | Disc.. | Line Amount."""
+    po = g(t, r'Nomor P\.O\s*:\s*([^\n]+)')
+    vendor = g(t, r'Vendor:\s*\n\s*(\S[^\n]+)')
+    rows = []
+    for line in t.splitlines():
+        raw = [p.strip() for p in line.split('|')]
+        parts = [p for p in raw if p and not re.fullmatch(r'\|+', p)]
+        if len(parts) < 8 or not re.fullmatch(r'\d{1,2}', parts[0]) or not re.fullmatch(r'\d{8}', parts[1]):
+            continue
+        sku, desc, uom, qty, price = parts[1], parts[2], parts[3], parts[4], parts[5]
+        discs = [p for p in parts[6:-1] if re.fullmatch(r'[\d.]+', p)]
+        amount = parts[-1]
+        if not re.fullmatch(r'[\d,.]+', amount):
+            continue
+        rows.append([po, vendor, '', (sku + ' ' + desc).strip(), qty, uom, price, ' '.join(discs[:2]), amount, page, 'OCR_ITEM'])
+    return rows
+
+def po_aeon(t, page):
+    """AEON vertical: idx / desc / pack / CARTON / packqty / itemno / barcode / qty / disc / '-' / unitprice / amount."""
+    po = g(t, r'(?i)PO\s+(?:No\.?)?\s*[:\n]\s*(\d{6,})') or g(t, r'\n(7\d{8})\n')
+    vendor = 'PT. SARANA ABADI MAKMUR BERSAMA'
+    rows = []
+    lines = [l.strip() for l in t.splitlines()]
+    for i, l in enumerate(lines):
+        if not re.fullmatch(r'\d{1,2}', l):
+            continue
+        blk = lines[i+1:i+13]
+        if len(blk) < 11 or not re.match(r'^[A-Z0-9 /&\'().+-]{6,}$', blk[0] or 'x'):
+            continue
+        desc = blk[0]
+        if not re.fullmatch(r'\d{2,3}\.\d{2}', blk[1] or 'x') or (blk[2] or '').upper() not in ('CARTON', 'PCS', 'CTN'):
+            continue
+        itemno = next((b for b in blk[4:7] if re.fullmatch(r'\d{8}', b)), '')
+        tail = [b for b in blk[5:] if re.fullmatch(r'\d[\d.,]*|-', b)]
+        qty = next((b for b in tail if re.search(r'\.\d{2}$', b) and float(b[:-3]) < 10000), '')
+        price = next((b for b in tail if re.fullmatch(r'\d{1,3}(,\d{3})*\.\d{2}', b) and b != qty and b != '0.00'), '')
+        amount = next((b for b in reversed(tail) if b not in ('-', price, qty)), '')
+        if qty and price and amount:
+            rows.append([po, vendor, '', (itemno + ' ' + desc).strip(), qty, blk[2], price, '', amount, page, 'OCR_ITEM'])
+    return rows
+
+def po_mitra(t, page):
+    """Mitra Belanja Anda: 'N sku9 desc BOX/n barcode qty [tick] price total'."""
+    po = g(t, r'PR No\s*[:\n]\s*(\d{6,})') or g(t, r'PO\s*#?\s*[:\n]\s*(\d{6,})')
+    rows = []
+    for line in t.splitlines():
+        m = re.match(r'^\s*(\d{1,2})\s+(\d{9})\s+(.+?)\s+(BOX/\d+|CTN/\d+|[A-Z]+/\d+)\s+(\d{13})\s+(\d+)\s+\S?\s*([\d.,]+)\s+([\d.,]+)\s*$', line)
+        if m:
+            idx, sku, desc, pack, barcode, qty, price, total = m.groups()
+            rows.append([po, 'PT. MITRA BELANJA ANDA', '', (sku + ' ' + desc).strip(), qty, pack, price, '', total, page, 'OCR_ITEM'])
+    return rows
+
+def tt_memo(p):
+    """Indofood 'Receiving Memo': 'N 9918.PL.. sku11 sku7 DESC SIZE qty CRT/n' + DO# header."""
+    t = p.get('text') or ''
+    date = g(t, r'Date\s*:\s*([^\n]+)')
+    doc = g(t, r'Receiving#?\s*:\s*([^\n]+)')
+    do = g(t, r'DO#?\s*:\s*([^\n]+)')
+    rows = []
+    for line in t.splitlines():
+        m = re.match(r'^\s*(\d{1,2})\s+(\d{4}\.PL\.\d{2}\.\d+)\s+(\d{9,11})\s+(\d{7})\s+(.+?)\s+(\d+)\s+(CRT/\d+|CTN/\d+|PAC)\s*$', line)
+        if m:
+            idx, pl, sku11, sku7, desc, qty, uom = m.groups()
+            rows.append([date, doc, pl, '', sku7, desc.strip(), qty, uom, p['page'], 'OCR_ITEM'])
+    sj = [[do, date, doc, p['page'], 'OCR_ITEM']] if do and rows else []
+    return rows, sj
+
 # ---------------- Faktur Penjualan (own table schema) ------------------------
 def inv_faktur_penjualan(p):
     t = p.get('text') or ''
@@ -332,13 +424,55 @@ def inv_faktur_penjualan(p):
 def tt_marimari(p):
     t = p.get('text') or ''
     date, doc = g(t, r'Tgl Terima\s*:\s*([^\n]+)'), g(t, r'No Receive\s*:\s*([^\n]+)')
-    po, vendor = g(t, r'No PO\s*:\s*([^\n]+)'), g(t, r'No Supplier\s*:\s*([^\n]+)')
+    po, vendor = g(t, r'No PO\s*:\s*([^\n]+)'), g(t, r'No PO\s*:\s*\d+\s*\n(\d{6})')
     rows = []
     for line in t.splitlines():
-        m = re.match(r'^\s*\d+\s+(\d{6,})\s+(\d{13})\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-Z]+)\s+(\d+)\s*(KTN|CTN|PC)\s+([\d.,]+)\s+([\d.,]+%)\s+([\d.,]+)', line)
+        m = re.match(r'^\s*\d+\s+(\d{6,})\s+(\d{12,14})\s+(.+?)\s+(\d+(?:\.\d+)?)\s+([A-Z]+)\s+(\d+)\s*(KTN|CTN|PC)\s+([\d.,]+)\s+(?:[\d.]+%\s+)?([\d.,]+)', line)
         if m:
-            item, _, desc, _pq, _pu, qty, uom, _pr, _d, _t = m.groups()
+            item, _, desc, _pq, _pu, qty, uom, _pr, _t = m.groups()
             rows.append([date, doc, po, vendor, item, desc.strip(), qty, uom, p['page'], 'OCR_ITEM'])
+    if rows:
+        return rows
+    # block variant (Mari-mari): idx / itemcode / desc / qty.pc / <qty> KTN / price / disc% / total
+    lines = [l.strip() for l in t.splitlines()]
+    starts = [i for i, l in enumerate(lines) if re.fullmatch(r'\d{1,2}', l)
+              and i + 1 < len(lines) and re.fullmatch(r'\d{6,}', lines[i+1])]
+    for k, i in enumerate(starts):
+        end = starts[k+1] if k+1 < len(starts) else min(i + 9, len(lines))
+        block = [b for b in lines[i+1:end] if b]
+        item = block[0] if block else ''
+        desc = next((b for b in block[1:4] if not re.fullmatch(r'[\d.,]+\s*\w*', b) and not b.isdigit()), '')
+        mq = next((re.match(r'(\d+(?:\.\d+)?)\s*(KTN|CTN|PC)', b) for b in block if re.match(r'^\d+(?:\.\d+)?\s+(KTN|CTN|PC)$', b)), None)
+        mkr = next((re.match(r'^(\d+)\s+(KTN|CTN)$', b) for b in block), None)
+        qty = mkr.group(1) if mkr else (mq.group(1) if mq else '')
+        uom = (mkr.group(2) if mkr else (mq.group(2) if mq else ''))
+        if item and desc and qty:
+            rows.append([date, doc, po, vendor, item, desc, qty, uom, p['page'], 'OCR_ITEM'])
+    return rows
+
+def tt_gr_slip(p):
+    """Farmers/Indogrosir/Grandlucky 'Good Receipt Slip': 'N item HL qty EA POIt itemline' + desc line."""
+    t = p.get('text') or ''
+    date = g(t, r'Posting Date\s*:\s*([^\n]+)')
+    doc = g(t, r'Document No\.?\s*:\s*([^\n]+)')
+    po = g(t, r'Purchase Order\s*:\s*([^\n]+)')
+    m = re.search(r'Vendor Number\s*:\s*(\d+)\s*\n([^\n]+)', t)
+    vendor = (m.group(1) + ' ' + m.group(2).strip()) if m else ''
+    rows = []
+    lines = t.splitlines()
+    for i, line in enumerate(lines):
+        m2 = re.match(r'^\s*(\d{1,2})\s+(\d{6,8})\s+(HL|IS|NH|HF)?\s*(\d+(?:\.\d+)?)\s+(EA|PAC|CTN|KTN)\s+(\d{4})\s+(\d{5})\s*$', line)
+        if not m2:
+            continue
+        idx, item, _hl, _pq, _pu, poit, poitem = m2.groups()
+        qty = _numbers([l.strip() for l in lines[i+1:i+3]])
+        # qty already on the same line as parsed _pq
+        desc = ''
+        for b in lines[i+1:i+3]:
+            bs = b.strip()
+            if bs and not re.fullmatch(r'[\d.,:]+', bs) and 'Status' not in bs and 'Page' not in bs and 'MART' not in bs:
+                desc = bs; break
+        rows.append([date, doc, po, vendor, item, desc, _pq, _pu, p['page'], 'OCR_ITEM'])
     return rows
 
 def tt_gr_boots(p):
@@ -378,17 +512,40 @@ def tt_grn_dfi(p):
     ref = g(t, r'NO REFERENCE\s*:\s*([^\n]+)')
     rows = []
     lines = t.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r'^\s*(\d{1,2})\s+(\d{5,}(?:\(\d{13}\))?)\s+(.+?)\s+([YN])\s+([YN])\s+(.*)$', line)
+    merged = []
+    i = 0
+    while i < len(lines):
+        l = lines[i].rstrip()
+        if re.match(r'^\s*\d{1,2}\s+\d{5,}(?:\(\d{12,14}\))?\s*$', l):
+            j = i + 1
+            while j < len(lines) and j < i + 4:
+                l = (l + ' ' + lines[j].strip()).strip()
+                j += 1
+                if re.search(r'[YN]\s+[YN]\s+\S', l):
+                    break
+            merged.append(l); i = j; continue
+        merged.append(l); i += 1
+    for line in merged:
+        m = re.match(r'^\s*(\d{1,2})\s+(\d{5,}(?:\(\d{12,14}\))?)\s*(.*?)\s*([YN])\s+([YN])\s+(.*)$', line)
         if not m:
             continue
         idx, plu, desc, _, _, rest = m.groups()
+        desc = desc.strip()
+        if not desc:
+            k = merged.index(line)
+            follow = []
+            for b in merged[k+1:k+3]:
+                if re.match(r'^\s*\d{1,2}\s+\d{5,}', b):
+                    break
+                follow.append(b.strip())
+            desc = ' '.join(x for x in follow if not re.fullmatch(r'[\d.,]+', x) and 'Printed' not in x).strip()
         nums = re.findall(r'\d[\d.,]*', rest)
-        qty = nums[1] if len(nums) > 1 else (nums[0] if nums else '')
+        m_ea = re.search(r'(\d[\d.,]*)\s*EA\s*(\d[\d.,]*)?', rest)
+        qty = (m_ea.group(2) or m_ea.group(1)) if m_ea else (nums[1] if len(nums) > 1 else '')
         price = next((n for n in nums if re.search(r'\d,\d{2}$', n) or n.endswith('.00')), '')
         total = nums[-1] if nums else ''
-        extra = ' | '.join(f'{k}: {v}' for k, v in (('Harga/KRT', price), ('Total Beli', total)) if v)
-        rows.append([date, doc, po, ref, plu, desc.strip() + (' ' + extra if extra else ''), qty, '', p['page'], 'OCR_ITEM'])
+        extra = ' | '.join(f'{k2}: {v}' for k2, v in (('Harga/KRT', price), ('Total Beli', total)) if v)
+        rows.append([date, doc, po, ref, plu, (desc + ' ' + extra).strip(), qty, 'EA' if m_ea else '', p['page'], 'OCR_ITEM'])
     return rows
 
 def tt_tiptop(p):
@@ -444,6 +601,10 @@ def build(pages):
             r = tt_marimari(p)
             sheets['Tanda Terima'] += r
             target, conf = 'Tanda Terima', 'HIGH' if r else 'LOW'
+        elif cat == 'GR_SLIP':
+            r = tt_gr_slip(p)
+            sheets['Tanda Terima'] += r
+            target, conf = 'Tanda Terima (GR Slip)', 'HIGH' if r else 'LOW'
         elif cat == 'GR_BOOTS':
             r = tt_gr_boots(p)
             sheets['Tanda Terima'] += r
@@ -457,6 +618,11 @@ def build(pages):
             sheets['Tanda Terima'] += tt_tiptop(p)
             sheets['Surat Jalan'] += sj_tiptop(p)
             target, conf = 'Tanda Terima + Surat Jalan', 'HIGH'
+        elif cat == 'RJ_MEMO':
+            r, sj = tt_memo(p)
+            sheets['Tanda Terima'] += r
+            sheets['Surat Jalan'] += sj
+            target, conf = 'Tanda Terima + Surat Jalan', 'HIGH' if r else 'LOW'
         elif cat == 'RJ_BUDI':
             r, sj = tt_budi(p)
             sheets['Tanda Terima'] += r
@@ -471,10 +637,10 @@ def build(pages):
                                            g(t, r'Tanggal (?:Transaksi|Faktur)\s*[:\s]*([^\n]+)'), n, 'OCR_PAGE_REVIEW'])
         elif cat == 'PURCHASE_ORDER':
             bpb_rows, bpb_sj = po_bpb(t, n)
-            rows = (po_farmers_horizontal(t, n) or po_dfj_inline(t, n) or po_dfj_horizontal(t, n)
-                    or po_tiptop_po(t, n) or po_boots_inline(t, n)
+            rows = (po_primafood_pipe(t, n) or po_farmers_horizontal(t, n) or po_dfj_inline(t, n) or po_dfj_horizontal(t, n)
+                    or po_tiptop_po(t, n) or po_boots_inline(t, n) or po_aeon(t, n)
                     or po_dfj_vertical(t, n) or po_boots_vertical(t, n) or po_tiptop(t, n)
-                    or po_primafood(t, n) or po_yogya(t, n) or po_kalimalang(t, n) or bpb_rows)
+                    or po_mitra(t, n) or po_primafood(t, n) or po_yogya(t, n) or po_kalimalang(t, n) or bpb_rows)
             if not rows and re.search(r'NO PO\s*:|PLU\(BAR\)|TGL PO', t, re.I):
                 rows = po_dfj_vertical(t, n)
             if not rows and re.search(r'ORDER NO|ORDER DATE', u2 := t.upper()):
