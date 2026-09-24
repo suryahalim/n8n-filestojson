@@ -29,8 +29,14 @@ services:
       # large batch uploads: raise request payload cap (MB) and keep binary files on disk, not RAM
       - N8N_PAYLOAD_SIZE_MAX=4000
       - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      # per-file cap for form/webhook multipart uploads (MB)
+      - N8N_FORMDATA_FILE_SIZE_MAX=100
+      # total file-size cap per multipart submission (MB); read by patched webhook-form-data.js
+      - N8N_FORMDATA_TOTAL_SIZE_MAX=1024
     volumes:
       - dp-n8n:/home/node/.n8n
+      # upstream formidable defaults maxTotalFileSize=maxFileSize; patch lets n8n honor the batch cap
+      - ./n8n/patches/webhook-form-data.js:/usr/local/lib/node_modules/n8n/dist/webhooks/webhook-form-data.js:ro
     depends_on:
       db:
         condition: service_healthy
@@ -77,6 +83,10 @@ services:
     build: ./extractor
     container_name: dp-extractor
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     dns:
       - 1.1.1.1
       - 8.8.8.8
