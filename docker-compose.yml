@@ -103,6 +103,7 @@ services:
       - OCR_MAX_PAGES=${OCR_MAX_PAGES:-0}
       - OCR_AUTO=${OCR_AUTO:-1}
       - OCR_WORKERS=${OCR_WORKERS:-4}
+      - OCR_NUMERIC_VERIFY=${OCR_NUMERIC_VERIFY:-0}  # selective 2nd-pass numeric verification OFF (speed/cost)
       - MAP_AUTO=${MAP_AUTO:-0}
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads

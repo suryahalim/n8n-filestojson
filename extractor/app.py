@@ -1318,7 +1318,7 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = "", max_pages: int = 0
                                     png_bytes = None
                                     txt = _tesseract(pg, lang)
                                 txt = _sanitize_ocr_text(txt)
-                                if engine == "qwen" and not txt.startswith("[BLANK") and _needs_numeric_verification(txt):
+                                if engine == "qwen" and os.environ.get("OCR_NUMERIC_VERIFY", "1") == "1" and not txt.startswith("[BLANK") and _needs_numeric_verification(txt):
                                     try:
                                         verification = api_numeric_verify(png_bytes, txt, ocr_cfg)
                                     except Exception as ve:
