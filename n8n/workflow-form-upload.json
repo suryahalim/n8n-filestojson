@@ -11,7 +11,7 @@
       "parameters": {
         "path": "it-upload",
         "formTitle": "IT Document Upload",
-        "formDescription": "Upload one or more documents (PDF / Excel / image). Max 1000 files per submission.",
+        "formDescription": "Upload one or more documents (PDF / Excel / image). Max 10000 files per submission.",
         "formFields": {
           "values": [
             {
@@ -19,7 +19,7 @@
               "fieldType": "file",
               "requiredField": true,
               "acceptFileTypes": ".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg",
-              "placeholder": "Select files - max 1000 per submission",
+              "placeholder": "Select files - max 10000 per submission",
               "multipleFiles": true
             },
             {
