@@ -26,6 +26,9 @@ services:
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - EXECUTIONS_DATA_PRUNE=true
       - EXECUTIONS_DATA_MAX_AGE=336
+      # large batch uploads: raise request payload cap (MB) and keep binary files on disk, not RAM
+      - N8N_PAYLOAD_SIZE_MAX=4000
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
     volumes:
       - dp-n8n:/home/node/.n8n
     depends_on:

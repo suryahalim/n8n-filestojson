@@ -11,7 +11,7 @@
       "parameters": {
         "path": "it-upload",
         "formTitle": "IT Document Upload",
-        "formDescription": "Upload one document (PDF / Excel / image). It is extracted, validated, and delivered to the target system automatically.",
+        "formDescription": "Upload one or more documents (PDF / Excel / image). Max 1000 files per submission.",
         "formFields": {
           "values": [
             {
@@ -19,7 +19,7 @@
               "fieldType": "file",
               "requiredField": true,
               "acceptFileTypes": ".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg",
-              "placeholder": "Select one or more files - max 25 MB each",
+              "placeholder": "Select files - max 1000 per submission",
               "multipleFiles": true
             },
             {
@@ -70,12 +70,23 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://extractor:5000/documents/batch",
+        "url": "=http://extractor:5000/documents?doc_type={{ $json.doc_type }}&notes={{ $json.notes }}",
         "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "file"
+            }
+          ]
+        },
         "options": {
-          "timeout": 120000,
+          "timeout": 300000,
+          "response": {
+            "response": {}
+          },
           "allowUnauthorizedCerts": false
         }
       },
@@ -86,12 +97,13 @@
       "position": [
         360,
         0
-      ]
+      ],
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "respondWith": "text",
-        "responseBody": "=Batch result \u2014 {{ $json.total }} file(s)\n{{ ($json.summary ? Object.entries($json.summary).map(e => e[0] + ': ' + e[1]).join(' | ') : '') }}\n\n{{ $json.results.map(r => (r.filename || '?') + '  ->  ' + r.status + (r.document_id ? '  (' + r.document_id.slice(0,8) + '\u2026)' : '')).join('\\n') }}",
+        "responseBody": "={{ $json.summary }}",
         "options": {}
       },
       "id": "respond-done",
@@ -105,7 +117,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const it = items[0].json;\nconst label = (it['Document type'] || 'Other').toString().trim().toLowerCase();\nconst MAP = {\"invoice\": \"invoice\", \"purchase order\": \"purchase_order\", \"report\": \"report\", \"sop / policy\": \"sop_policy\", \"other\": \"other\"};\nlet notes = (it['Notes'] || '').toString();\nnotes = notes.replace(/[^A-Za-z0-9._ -]/g, '_').slice(0,200);\n\nconst bin = items[0].binary || {};\nconst keys = Object.keys(bin).filter(k => /^Document_file/.test(k));\nconst files = [];\nfor (const k of keys) {\n  // binary may live on disk (filesystem mode) - read true bytes via helper\n  const buf = await this.helpers.getBinaryDataBuffer(0, k);\n  const mime = bin[k].mimeType || '';\n  files.push({ name: bin[k].fileName || k, mime: mime, data_b64: buf.toString('base64') });\n}\nreturn [{ json: { body: { doc_type: MAP[label] || 'other', notes: notes, skip_existing: true, auto_ocr: true, files: files } } }];"
+        "jsCode": "// one item per uploaded file, streaming path: per-file multipart POST (no base64, no giant JSON body)\nconst it = items[0].json;\nconst label = (it['Document type'] || 'Other').toString().trim().toLowerCase();\nconst MAP = {\"invoice\": \"invoice\", \"purchase order\": \"purchase_order\", \"report\": \"report\", \"sop / policy\": \"sop_policy\", \"other\": \"other\"};\nlet notes = (it['Notes'] || '').toString().replace(/[^A-Za-z0-9._ -]/g, '_').slice(0,200);\nconst out = [];\nfor (const item of items) {\n  const bin = item.binary || {};\n  for (const k of Object.keys(bin).filter(x => /^Document_file/.test(x))) {\n    out.push({ json: { doc_type: MAP[label] || 'other', notes: notes, name: bin[k].fileName || k },\n               binary: { file: bin[k] } });\n  }\n}\nif (!out.length) throw new Error('No files received in the submission');\nreturn out;"
       },
       "id": "normalize",
       "name": "Prepare Batch",
@@ -114,6 +126,20 @@
       "position": [
         120,
         0
+      ],
+      "mode": "code"
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $input.all().map(x => x.json);\nconst ok = results.filter(r => r && (r.document_id || (r.status && r.status !== 'ERROR')));\nconst err = results.filter(r => !r || r.error || r.status === 'ERROR');\nconst lines = [];\nlines.push(`uploaded: ${ok.length}, failed: ${err.length}, total: ${results.length}`);\nfor (const r of ok.slice(0, 50)) lines.push(`${String(r.document_id||'').slice(0,8)} ${r.status||''} ${r.filename||''}`);\nfor (const r of err.slice(0, 10)) lines.push(`FAIL: ${r.filename||r.error||JSON.stringify(r).slice(0,120)}`);\nif (results.length > 60) lines.push(`...(${results.length} results; check DB /view for full list)`);\nlines.push('auto-OCR queued sequentially (one doc at a time).');\nreturn [{ json: { summary: lines.join('\\n') } }];"
+      },
+      "id": "summarize-results-1",
+      "name": "Summarize Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
       ]
     }
   ],
@@ -141,6 +167,17 @@
       ]
     },
     "Send to Extractor": {
+      "main": [
+        [
+          {
+            "node": "Summarize Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize Results": {
       "main": [
         [
           {

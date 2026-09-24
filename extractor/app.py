@@ -516,8 +516,8 @@ async def upload_batch(request: Request):
     files = body.get("files") or []
     if not isinstance(files, list) or not files:
         raise HTTPException(400, "files: non-empty list required")
-    if len(files) > 25:
-        raise HTTPException(400, "batch max 25 files")
+    if len(files) > 1000:
+        raise HTTPException(400, "batch max 1000 files")
     results = []
     for f in files:
         name = (f or {}).get("name") or "unnamed"
