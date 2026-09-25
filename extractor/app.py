@@ -7,7 +7,7 @@ Also hosts /mock/receiving as stand-in downstream system."""
 import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request, asyncio
 import time
 import threading
-import subprocess, tempfile
+import subprocess, tempfile, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 log = logging.getLogger("extractor")
@@ -95,7 +95,9 @@ def validate(env: dict):
         if len(text_all.strip()) < 20:
             flags.append({"field": "extracted.pages.text", "value": "near-empty",
                           "rule": "min 20 chars (scanned/blank pdf? needs OCR)"})
-        elif len(ext.get("pages", [])) > 1 and any(len((p.get("text") or "").strip()) < 20 for p in ext.get("pages", [])):
+        elif len(ext.get("pages", [])) > 1 and any(
+                len((p.get("text") or "").strip()) < 20 and not (p.get("text") or "").strip().startswith("[BLANK_PAGE]")
+                for p in ext.get("pages", [])):
             flags.append({"field": "extracted.pages.text", "value": "one-or-more-pages-near-empty",
                           "rule": "multi-page PDF has a page needing OCR before classification/splitting"})
     if ext["kind"] == "xlsx":
@@ -1256,6 +1258,25 @@ async def map_doc(doc_id: str, request: Request):
     return {"document_id": doc_id, "mapped": mapped}
 
 
+def finalize_status(doc_id: str):
+    """Recompute validation + status from stored standard_json (used by chunked/resumed OCR)."""
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
+        d = cur.fetchone()
+        if not d or not d["standard_json"]:
+            return
+        std = d["standard_json"]
+        env = {"schema_version": std.get("schema_version", "1.0"), "document_id": doc_id,
+               "filename": d["filename"], "sha256": d["sha256"], "extracted": std}
+        ok, flags = validate(env)
+        status = "VALIDATED" if ok else "FLAGGED"
+        cur.execute("UPDATE documents SET standard_json=%s::jsonb, validation=%s::jsonb, status=%s, updated=now() WHERE id=%s",
+                    (json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}), status, doc_id))
+        c.commit()
+        print("AUTO-OCR-FINALIZE", doc_id[:8], status, flush=True)
+    return status
+
+
 @app.post("/documents/{doc_id}/ocr")
 def run_ocr(doc_id: str, lang: str = "eng", engine: str = "", max_pages: int = 0, dpi: int = 0, start_page: int = 1):
     """OCR the STORED original (pdf-scan or image), merge into standard_json,
@@ -1294,78 +1315,116 @@ def run_ocr(doc_id: str, lang: str = "eng", engine: str = "", max_pages: int = 0
                 if requested_pages <= 0:
                     requested_pages = total_pages - start_page + 1
                 end_page = min(total_pages, start_page + requested_pages - 1)
-                with tempfile.TemporaryDirectory() as td:
-                    prefix = os.path.join(td, "pg")
-                    render_dpi = dpi if dpi > 0 else int(OCR_DPI)
-                    subprocess.run(["pdftoppm", "-png", "-r", str(render_dpi), "-f", str(start_page), "-l", str(end_page), path, prefix],
-                                   check=True, timeout=300)
-                    pngs = sorted(
-                        glob.glob(prefix + "*.png"),
-                        key=lambda p: int(os.path.basename(p).rsplit("-", 1)[-1].split(".", 1)[0])
-                    )
-                    def process_page(item):
-                        i, pg = item
-                        print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} START", flush=True)
-                        last_error = None
-                        verification = None
-                        for attempt in range(1, 4):
-                            try:
-                                if engine == "qwen":
-                                    with open(pg, "rb") as fh:
-                                        png_bytes = fh.read()
-                                    txt = api_vision_ocr(png_bytes, ocr_cfg)
-                                else:
-                                    png_bytes = None
-                                    txt = _tesseract(pg, lang)
-                                txt = _sanitize_ocr_text(txt)
-                                if engine == "qwen" and os.environ.get("OCR_NUMERIC_VERIFY", "1") == "1" and not txt.startswith("[BLANK") and _needs_numeric_verification(txt):
-                                    try:
-                                        verification = api_numeric_verify(png_bytes, txt, ocr_cfg)
-                                    except Exception as ve:
-                                        verification = {"status": "REVIEW", "discrepancies": ["numeric verification failed: " + str(ve)[:180]]}
-                                last_error = None
-                                break
-                            except Exception as e:
-                                last_error = e
-                                if attempt < 3:
-                                    print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} RETRY {attempt}", str(e)[:180], flush=True)
-                                    time.sleep(5 * attempt)
-                        if last_error is not None:
-                            raise last_error
-                        result = {"page": i, "text": txt, "numeric_verification": verification}
-                        print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} DONE", len(txt), "chars", flush=True)
-                        return result
+                prefix_dir = tempfile.mkdtemp(prefix="ocrr-")
+                def chunk_render_pages(all_items):
+                    """Render PNGs in chunks (pdftoppm 300s cap) for given page numbers."""
+                    out = {}
+                    CH = 80
+                    for ci in range(0, len(all_items), CH):
+                        cnums = all_items[ci:ci + CH]
+                        td = tempfile.mkdtemp(dir=prefix_dir)
+                        prefix = os.path.join(td, "pg")
+                        subprocess.run(["pdftoppm", "-png", "-r", str(dpi if dpi > 0 else int(OCR_DPI)),
+                                        "-f", str(cnums[0]), "-l", str(cnums[-1]), path, prefix],
+                                       check=True, timeout=300)
+                        for pngp in glob.glob(prefix + "*.png"):
+                            out[int(os.path.basename(pngp).rsplit("-", 1)[-1].split(".", 1)[0])] = pngp
+                        for c in cnums:  # pdftoppm numbering sanity
+                            if c not in out:
+                                raise RuntimeError(f"render missing page {c}")
+                    return out
+                # RESUME: keep already-OCR'd pages (same engine) to save time/cost on retries
+                prior_pages = {}
+                if std.get("ocr_engine") == engine and std.get("kind") == "pdf":
+                    for p in std.get("pages", []):
+                        t = (p.get("text") or "").strip()
+                        # keep substantive pages AND engine-confirmed blank pages (avoid re-OCR loop)
+                        if t and (len(t) >= 20 or t.startswith("[BLANK_PAGE]")):
+                            try: prior_pages[int(p["page"])] = p
+                            except (TypeError, ValueError): pass
+                if engine == "qwen":
+                    todo = [i for i in range(start_page, end_page + 1) if i not in prior_pages]
+                else:
+                    todo = list(range(start_page, end_page + 1))
+                    prior_pages = {}
+                page_results = dict(prior_pages)
+                print("AUTO-OCR", doc_id[:8], f"RESUME skip={len(prior_pages)} todo={len(todo)}", flush=True)
+                def render_and_ocr(todo_list):
+                    png_map = chunk_render_pages(todo_list)
+                    return [(n, png_map[n]) for n in sorted(png_map)]
 
-                    worker_count = max(1, min(int(os.environ.get("OCR_WORKERS", "4")), len(pngs)))
-                    page_results = {}
-                    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ocr") as pool:
-                        futures = {pool.submit(process_page, item): item[0]
-                                   for item in enumerate(pngs, start_page)}
-                        for future in as_completed(futures):
-                            result = future.result()
-                            page_results[result["page"]] = result
-                            pages_text = [page_results[k] for k in sorted(page_results)]
-                            progress_std = dict(std)
-                            progress_std["kind"] = "pdf"
-                            progress_std["ocr_engine"] = engine
+                def process_page(item):
+                    i, pg = item
+                    print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} START", flush=True)
+                    last_error = None
+                    verification = None
+                    for attempt in range(1, 4):
+                        try:
                             if engine == "qwen":
-                                progress_std["ocr_model"] = ocr_cfg["model"]
-                            progress_std["ocr_workers"] = worker_count
-                            progress_std["pages"] = list(pages_text)
-                            progress_std["ocr_progress"] = {
-                                "status": "RUNNING", "completed_pages": len(pages_text),
-                                "total_pages": total_pages, "completed_chars": sum(len(p["text"]) for p in pages_text),
-                                "numeric_verified_pages": sum(1 for p in pages_text if (p.get("numeric_verification") or {}).get("status") == "PASS"),
-                                "numeric_review_pages": sum(1 for p in pages_text if (p.get("numeric_verification") or {}).get("status") == "REVIEW"),
-                                "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
-                            }
-                            cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
-                                        (json.dumps(progress_std), doc_id))
-                            c.commit()
-                    std["kind"] = "pdf"
-                    std["ocr_engine"] = engine
-                    if engine == "qwen": std["ocr_model"] = ocr_cfg["model"]
-                    std["ocr_workers"] = worker_count
+                                with open(pg, "rb") as fh:
+                                    png_bytes = fh.read()
+                                txt = api_vision_ocr(png_bytes, ocr_cfg)
+                            else:
+                                png_bytes = None
+                                txt = _tesseract(pg, lang)
+                            txt = _sanitize_ocr_text(txt)
+                            if engine == "qwen" and os.environ.get("OCR_NUMERIC_VERIFY", "1") == "1" and not txt.startswith("[BLANK") and _needs_numeric_verification(txt):
+                                try:
+                                    verification = api_numeric_verify(png_bytes, txt, ocr_cfg)
+                                except Exception as ve:
+                                    verification = {"status": "REVIEW", "discrepancies": ["numeric verification failed: " + str(ve)[:180]]}
+                            last_error = None
+                            break
+                        except Exception as e:
+                            last_error = e
+                            if attempt < 3:
+                                print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} RETRY {attempt}", str(e)[:180], flush=True)
+                                time.sleep(5 * attempt)
+                    if last_error is not None:
+                        raise last_error
+                    result = {"page": i, "text": txt, "numeric_verification": verification}
+                    print("AUTO-OCR-PAGE", doc_id[:8], f"{i}/{total_pages} DONE", len(txt), "chars", flush=True)
+                    return result
+
+                worker_count = max(1, min(int(os.environ.get("OCR_WORKERS", "4")), max(len(todo), 1)))
+                def persist_progress():
+                    ptext = [page_results[k] for k in sorted(page_results)]
+                    progress_std = dict(std)
+                    progress_std["kind"] = "pdf"
+                    progress_std["ocr_engine"] = engine
+                    if engine == "qwen":
+                        progress_std["ocr_model"] = ocr_cfg["model"]
+                    progress_std["ocr_workers"] = worker_count
+                    progress_std["pages"] = list(ptext)
+                    progress_std["ocr_progress"] = {
+                        "status": "RUNNING", "completed_pages": len(page_results),
+                        "total_pages": total_pages, "completed_chars": sum(len(p["text"]) for p in ptext),
+                        "numeric_verified_pages": sum(1 for p in ptext if (p.get("numeric_verification") or {}).get("status") == "PASS"),
+                        "numeric_review_pages": sum(1 for p in ptext if (p.get("numeric_verification") or {}).get("status") == "REVIEW"),
+                        "updated_at": datetime.datetime.utcnow().isoformat() + "Z"
+                    }
+                    cur.execute("UPDATE documents SET standard_json=%s::jsonb, updated=now() WHERE id=%s",
+                                (json.dumps(progress_std), doc_id))
+                    c.commit()
+
+                try:
+                    CH = 80
+                    for ci in range(0, len(todo), CH):
+                        chunk = todo[ci:ci + CH]
+                        items = render_and_ocr(chunk)
+                        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ocr") as pool:
+                            futures = {pool.submit(process_page, item): item[0] for item in items}
+                            for future in as_completed(futures):
+                                result = future.result()
+                                page_results[result["page"]] = result
+                                persist_progress()
+                finally:
+                    shutil.rmtree(prefix_dir, ignore_errors=True)
+                pages_text = [page_results[k] for k in sorted(page_results)]
+                std["kind"] = "pdf"
+                std["ocr_engine"] = engine
+                if engine == "qwen": std["ocr_model"] = ocr_cfg["model"]
+                std["ocr_workers"] = worker_count
             elif mime in ("image/jpeg", "image/png", "image/webp"):
                 if engine == "qwen":
                     with open(path, "rb") as fh:

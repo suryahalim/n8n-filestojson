@@ -366,8 +366,13 @@ def po_yogya(t, page):
         desc = next((b for b in block[3:6] if not re.fullmatch(r'-?[\d.,:%]+', b) and b not in ('1:',)), '')
         nums = _block_numbers(block[3:], 8)
         qty = nums[0] if nums else ''
-        price = next((x for x in nums[1:5] if re.search(r'\.\d{2}$', x) and float(x.replace(',', '')) > 1000), '')
-        total = next((x for x in reversed(nums) if re.search(r'\.\d{2}$', x) and float(x.replace(',', '')) >= float(price.replace(',', '') or 0)), '') if price else ''
+        def _f(x):
+            try:
+                return float(x.replace(',', ''))
+            except ValueError:
+                return 0.0
+        price = next((x for x in nums[1:5] if re.search(r'\.\d{2}$', x) and _f(x) > 1000), '')
+        total = next((x for x in reversed(nums) if re.search(r'\.\d{2}$', x) and _f(x) >= _f(price)), '') if price else ''
         rows.append([po, '', '', (code + ' ' + desc).strip(), qty, '', price, '', total, page, 'OCR_ITEM'])
     return rows
 
