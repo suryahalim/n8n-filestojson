@@ -211,6 +211,13 @@ def fp_sheet_rows(rows_by_doc):
             out.append(r)
     return out
 
+def canon_vendor(n):
+    """Normalize OCR'd company names: whitespace, trailing page junk, known typos."""
+    n = re.sub(r'\s+', ' ', str(n)).strip().rstrip('.,')
+    n = re.sub(r'\s+LEMBAR\s+I\s*$|\s+I\s*$', '', n, flags=re.I)
+    n = re.sub(r'Supra\s+Baga\s+Lestari', 'Supra Boga Lestari', n)
+    return n.strip()
+
 def fn_is_efaktur(fn):
     return bool(re.match(r'^\d{15}-\d{16}-\d{16}-\d{14}\.pdf$', fn or ''))
 
@@ -291,6 +298,53 @@ def main():
                 continue
         # scan booklet -> existing per-vendor page classifiers
         sh, rv = build(pages)
+        # --- self-company vendor rule (learned): OUR company is not a vendor ---
+        rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor_rules.json')
+        try:
+            RULES = json.load(open(rules_path))
+        except Exception:
+            RULES = {"self_companies": [], "junk": [], "learned_po_vendor": {}}
+        self_re = re.compile('|'.join(RULES.get('self_companies') or [r'SARANA\s+ABADI\s+MAKMUR']), re.I)
+        junk_re = re.compile('|'.join(RULES.get('junk') or [])) if RULES.get('junk') else None
+        comp_re = re.compile(r'(?:PT\.?\s+|CV\.?\s+|PD\.?\s+)([A-Z][A-Za-z .,&\'-]{5,45})')
+        page_by_no = {int(p.get('page', 0)): (p.get('text') or '') for p in pages}
+        learned = RULES.setdefault('learned_po_vendor', {})
+        junk_all = re.compile('|'.join(RULES.get('junk') or [r'(?!)']))
+        for r in sh.get('PO Customer', []):
+            if len(r) < 10: continue
+            if junk_all.search(str(r[1])):
+                r[1] = ''   # never keep an OCR-label as vendor name
+            if not self_re.search(str(r[1])):
+                continue
+            po_key = str(r[0]).strip()
+            if po_key and learned.get(po_key):
+                r[1] = learned[po_key]; r[10] = (r[10] or '') + '|VENDOR-FIXED'; continue
+            t = page_by_no.get(r[9], '') if isinstance(r[9], int) else ''
+            cands = []
+            for m in comp_re.finditer(t):
+                n = canon_vendor(m.group(0))
+                if self_re.search(n): continue
+                if junk_re and junk_re.search(n): continue
+                if n not in cands: cands.append(n)
+            # prefer a company right after a vendor/supplier/kepada label
+            pick = ''
+            lm = re.search(r'(?:Vendor|Supplier|Kepada|To)\s*[:.]?\s*((?:PT\.?|CV\.?)\s*[A-Z][A-Za-z .,&\'-]{4,45})', t, re.I)
+            if lm and not self_re.search(lm.group(1)) and not (junk_re and junk_re.search(lm.group(1))):
+                pick = canon_vendor(lm.group(1))
+            elif cands:
+                pick = cands[0]
+            if pick:
+                r[1] = pick
+                r[10] = (r[10] or '') + '|VENDOR-FIXED'
+                if po_key: learned[po_key] = pick
+            else:
+                # cannot attribute a real third-party vendor -> blank the self-company
+                # (row then only survives tidy if it carries real item data)
+                r[1] = ''
+                r[10] = (r[10] or '') + '|VENDOR-UNRESOLVED'
+        RULES['self_companies'] = list(set(RULES.get('self_companies') or []) | {r'SARANA\s+ABADI\s+MAKMUR'})
+        json.dump(RULES, open(rules_path, 'w'), indent=1, ensure_ascii=False)
+        # ----------------------------------------------------------------------
         stem = (doc['filename'] or did[:8]).rsplit('.pdf',1)[0][:28]
         SPIDX = {'Faktur Penjualan': 15, 'PO Customer': 9, 'Tanda Terima': 8,
                  'Surat Jalan': 3, 'Dokumen Pelunasan': 12}

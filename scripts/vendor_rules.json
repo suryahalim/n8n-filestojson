@@ -1,0 +1,50 @@
+{
+ "self_companies": [
+  "SARANA\\s+ABADI\\s+MAKMUR"
+ ],
+ "junk": [
+  "^PT\\.?\\s*Address",
+  "^PT\\.?\\s*Total",
+  "^PT\\.?\\s*Jumlah",
+  "^PT\\.?\\s*Yang",
+  "^PT\\.?\\s*Yang\\s",
+  "^CV\\.?\\s*ORDER",
+  "^PT\\.?\\s*Nama",
+  "^PT\\.?\\s*No\\.?\\s",
+  "^PT\\.?\\s*ORDER\\s+DATE",
+  "^PT\\.?\\s*Dan\\s"
+ ],
+ "learned_po_vendor": {
+  "1001000125418": "PT AEON INDONESIA",
+  "10071000251693": "PT AEON INDONESIA",
+  "10071000251108": "PT AEON INDONESIA",
+  "3014023069": "PT Supra Boga Lestari Tbk",
+  "3014030054": "PT Supra Boga Lestari Tbk",
+  "10071000251665": "PT AEON INDONESIA",
+  "0007.PO.26.072178": "PT. TIP TOP",
+  "0007.PO.26.072180": "PT. TIP TOP",
+  "10071000251149": "PT AEON INDONESIA",
+  "10071000251094": "PT AEON INDONESIA",
+  "10071000251170": "PT AEON INDONESIA",
+  "10071000251916": "PT AEON INDONESIA",
+  "10071000250832": "PT AEON INDONESIA",
+  "3014021892": "PT Supra Boga Lestari Tbk",
+  "10071000251010": "PT AEON INDONESIA",
+  "10071000251007": "PT AEON INDONESIA",
+  "10011001501673": "PT AEON INDONESIA",
+  "3014023766": "PT Supra Boga Lestari Tbk",
+  "3014024331": "PT Supra Boga Lestari Tbk",
+  "3014030068 Purch. Grp : 2132 Grand Sedayu": "PT Supra Boga Lestari Tbk",
+  "10071000251336": "PT AEON INDONESIA",
+  "3014033238": "PT Supra Boga Lestari Tbk",
+  "10071000251282": "PT AEON INDONESIA",
+  "3014034119 Purch. Grp : Stock Controller": "PT Supra Boga Lestari Tbk",
+  "3014035617 Purch. Grp : Stock Controller": "PT Supra Boga Lestari Tbk",
+  "3014033949 Purch. Grp : Stock Controller 6899": "PT Supra Boga Lestari Tbk",
+  "3014035116 Purch. Grp : Stock Controller": "PT Supra Boga Lestari Tbk",
+  "0004.PO.26.090695": "PT. TIP TOP",
+  "3014035692": "PT Supra Boga Lestari Tbk",
+  "10051000227224": "PT AEON INDONESIA",
+  "3014030803 Purch. Grp : Stock Controller": "PT Supra Boga Lestari Tbk"
+ }
+}
