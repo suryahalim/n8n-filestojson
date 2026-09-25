@@ -342,6 +342,28 @@ def main():
         else: r[17]='REVIEW-ARITH'; fp_fixed+=1
     print('arith relabel: PO',po_fixed,'FP',fp_fixed, flush=True)
 
+    # TIDY: never write placeholder/semantics-less rows to data tabs.
+    # - rows whose Mapping/Review status is OCR_PAGE_REVIEW (page-level header leftovers)
+    # - rows where every non-provenance cell is empty
+    PROV={'Source Page','Mapping Status','Confidence','Review Status','Source File'}
+    def _tidy(tab, rows):
+        hdr=HEADERS.get(tab, [])
+        keepidx=[i for i,h in enumerate(hdr) if h not in PROV]
+        out=0
+        def good(r):
+            if 'OCR_PAGE_REVIEW' in [str(x) for x in r[-2:]]: return False
+            if keepidx and not any(str(r[i]).strip() for i in keepidx if i<len(r)): return False
+            return True
+        kept=[r for r in rows if good(r)]
+        return kept
+    for k in ['PO Customer','Tanda Terima','Surat Jalan']:
+        if k in sheets:
+            before=len(sheets[k]); sheets[k]=_tidy(k, sheets[k])
+            print('tidy',k,before,'->',len(sheets[k]), flush=True)
+    # Faktur Penjualan: drop rows where all data cols empty (confidence/review status only)
+    sheets['Faktur Penjualan']=[r for r in sheets['Faktur Penjualan']
+        if any(str(r[i]).strip() for i in range(15))]
+
     counts = {k: len(v) for k, v in sheets.items() if k != 'Faktur Pajak'}
     counts['Faktur Pajak'] = len(sheets['Faktur Pajak'])
     counts['Faktur Pajak (docs)'] = f'{fp_ok} PASS / {fp_low} REVIEW'
