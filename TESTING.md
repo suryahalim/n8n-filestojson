@@ -1,9 +1,10 @@
 # Doc Pipeline — Test Case Suite & Documentation
 
-Version: 2026-09-18 · All cases executed live on this date — **PASS** (U10 is the composite of U1–U4+U7, each verified live today; run it as one sitting during real UAT).
+Version: 2026-09-30 · Base cases executed live 2026-09-18 — **PASS** (U10 is the composite of U1–U4+U7, each verified live that day; run it as one sitting during real UAT).
 **OCR testing (2026-09-19): use `OCR_TEST_PLAYBOOK.md` — T1–T8, dedupe currently OFF for testing (`INGEST_ALLOW_DUP=1`).**
+**Batch mapping testing (2026-09-24→30): see §9 M-series — full-run evidence on 1.276 documents, live verification 2026-09-30: 0 real problems.**
 
-**Rule of thumb:** UI cases (U-series) = what your staff/stakeholders will do. Code cases (C-series) = regression checks you (or CI) run once before declaring any change safe.
+**Rule of thumb:** UI cases (U-series) = what your staff/stakeholders will do. Code cases (C-series) = regression checks you (or CI) run once before declaring any change safe. Mapping cases (M-series) = read-back proofs against the live Google Sheet, run after every `batch_map.py` write.
 
 ---
 
@@ -198,14 +199,53 @@ Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re
 ## 7. Known gaps (be honest in UAT)
 
 1. ~~OCR human-in-the-loop~~ → Tesseract auto-OCR live (U11); Qwen engine live (U12, model=qwen3.8-flash via QWEN_MODEL env) — dedicated qwen-vl swap pending.
-2. **PDF tables arrive as line text**, not cell-structured rows (xlsx does have real rows/cols). (Planned: pdfplumber pass.)
+2. **PDF tables arrive as line text**, not cell-structured rows (xlsx does have real rows/cols). (Planned: pdfplumber pass.) — Note: for the RPA batch path this is solved downstream by the deterministic parsers in `batch_map.py` (M-series), not by the extractor.
 3. Receiving **inbox view is in-memory** (last 20, cleared on restart); the DB trail in `/view` is permanent.
 4. Batch form = one doc_type/notes per submission (per-file metadata needs the API).
 5. Typed domain tables are not yet separate; child documents currently map to the shared `invoice_rows` ledger and are distinguished by `doc_class`.
 6. `TARGET_API_URL` is still the mock until a real endpoint is set in compose.
+7. **Numeric verification is OFF by user decision** (`OCR_NUMERIC_VERIFY=0`, since 2026-09-24): values that fail arithmetic stay `REVIEW-ARITH` with verbatim OCR numbers; the self-learning KB (§9 M5) converts proven rows to `PASS-LEARNED` incrementally, and OCR digit-confusion fixes apply only with exact re-fit proof. Remaining `REVIEW-ARITH` (~2.8K rows in Faktur Penjualan) is the honest open item — candidate for a targeted visual re-OCR pass.
+8. 228 PO rows have empty vendor (no vendor text on their source page; ~85 self-recover via `learned_po_vendor` when other booklet pages arrive in future runs).
 
 ## 8. FAQ while testing
 
 - Form won't open → Tailscale off. · Workflow edit ignored → must **Publish** (n8n top-right) — production runs the published version. · Payload empty in webhook → send FLAT JSON, never wrap in `{"body":...}`. · Task stuck QUEUED → worker down (`docker logs dp-worker`); sweeper self-heals within ~20 s if the bus message was missed. · n8n login loop → `N8N_SECURE_COOKIE=false` already set (USAGE §3.5).
 
 Operations (start/stop/backup/env) live in **USAGE.md**.
+
+---
+
+## 9. Batch mapping cases (M-series) — Google Sheets RPA tables, live 2026-09-24 → 2026-09-30
+
+Target: fresh **copy** of the `Result RPA` template (sheet id in `copy_sid.txt`; original template never touched). All proofs below run against the **live sheet via API read-back**, never against local counters.
+
+### M1 · Write integrity — PASS ✅
+`scripts/read_sheet.py` → `/tmp/sheet_now.json`, compared row-by-row to the pre-write dump (`--dump`).
+Final state (2026-09-30): Faktur Penjualan 6.218 · PO Customer 700 · Tanda Terima 842 · Surat Jalan 112 · Faktur Pajak 5.091 · OCR Mapping Review 5.542 · Dokumen Pelunasan 0 (header only, correct). All tabs dump==sheet.
+
+### M2 · e-Faktur full extraction — PASS ✅
+1.257/1.257 docs parsed, 1.257 unique faktur numbers in sheet, Σitem = footer Harga Jual on every faktur (0 mismatch), incl. the 3 layout variants (normal / PPN-dibebaskan / multi-item continuation). Cross-check consumed zero LLM tokens (regex over native PDF text layer).
+
+### M3 · Provenance — PASS ✅
+All 12.157 `p<page> <filename>` references across all tabs resolve to a real document in the corpus with page number ≤ that document's real page count. Orphan refs: 0.
+
+### M4 · Vendor hygiene (self-learning rules) — PASS ✅
+`vendor_rules.json` enforced on read-back: rows with self-company (SARANA ABADI MAKMUR) as vendor: **0** (was 244 before rules). Junk-label vendors (`PT ORDER DATE` etc.): **0**. Placeholder/empty data rows in every tab: **0** (tidy filter permanent in `batch_map.py`). `learned_po_vendor` memory: growing every run (31+ POs memorized at first write).
+
+### M5 · Self-learning variant KB (llm-wiki pattern) — PASS ✅
+`scripts/knowledge.py learn/apply/wiki`, wired into `batch_map.py` (apply before write, learn after successful write).
+- Promoted semantics: `qty=carton*isi+pcs` for the SAMB sales-booklet variant (1.988 arithmetic-proven evidence rows; threshold ≥3 consistent & ≥60%).
+- Effect on sheet: `PASS-LEARNED` 375 rows (relabel only on exact arithmetic proof), `PASS-LEARNED-CORR` 10 rows (single OCR digit fixed via conf rule seen ≥2× in same variant, corrected value re-fits `jumlah` exactly — e.g. `7.600,00→7.800,00`).
+- Wiki renders `knowledge/companies/*.md` + `INDEX.md` after every run; contradictions recorded, never silently resolved.
+- Independent re-proof of all PASS-LEARNED rows from the sheet alone: 375/375 verify, 0 bad.
+
+### M6 · Date-field repair (Tanda Terima) — PASS ✅
+67 rows had column-header text bleeding into Posting Date → repaired from raw page text via provenance line; 314 valid-but-varied formats (`15-SEP-26`, `16/09/26 09:36:53`) normalized to `dd/mm/yyyy`. Remaining blanks: 31 (no date printed on those source pages — honest blank, not fabricated).
+
+### M7 · Coverage completeness — PASS ✅
+Every document in both upload windows appears in the sheet (data tabs or review tab): 1.276/1.276, `skipped-OCR-incomplete: []`. Note: e-Faktur rows carry Source File (native PDF, no page refs) — checker must match on `r[18][:28]`, and review rows live in `dump['review']`, not `dump['sheets']`.
+
+Run the whole M-series in one command after any write:
+```bash
+cd ~/doc-pipeline && python3 scripts/read_sheet.py && python3 scripts/verify_sheet.py
+```

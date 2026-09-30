@@ -59,6 +59,8 @@ Env vars below are the **bootstrap/DR path** (used only until the UI saves a con
 | `QWEN_MODEL` | `qwen3.8-flash` | OCR model — swap e.g. `qwen-vl-ocr`, no code change |
 | `QWEN_URL` | token-plan compatible-mode | chat-completions endpoint |
 | `OCR_ENGINE` | `qwen` | fallback engine when caller omits `engine` (`qwen`\|`tesseract`) |
+| `OCR_WORKERS` | `4` | parallel OCR workers (page-level queue) |
+| `OCR_NUMERIC_VERIFY` | `0` | selective visual re-check of numeric pages; OFF by user decision 2026-09-24 (rows that fail arithmetic then stay `REVIEW-ARITH`, values kept verbatim) |
 | `INGEST_ALLOW_DUP` | `1` (testing) | `0` = sha256 dedupe ON for production |
 | `OCR_MAX_PAGES` / `OCR_DPI` | `0` / `200` | `0` = process every page; positive value = optional OCR cap / render DPI |
 | `TARGET_API_URL` | mock | real receiving endpoint; contract `{"accepted":true}` |
@@ -122,6 +124,29 @@ NOTE (honest limits, verified 2026-09-21): a 33-page multi-SO sales-booklet retu
 
 **Change OCR model:** open `http://<host>:5000/view/settings` → edit Model (or Fetch models) → Test → Save. Effective immediately — no restart. CLI fallback still works: edit `QWEN_MODEL` in `.env` + `docker compose up -d extractor` (only read when `data/ocr_config.json` absent). Verify model exists in plan first (404 = not available).
 
+## Batch mapping to Google Sheets (RPA result tables) — `scripts/batch_map.py`
+
+The large-scale path proven on 1.276 real documents (1.257 e-Faktur PDFs + 19 scan booklets, ~12K OCR pages): map everything **deterministically, zero LLM tokens**, into a fresh copy of the `Result RPA` template.
+
+```bash
+cd ~/doc-pipeline
+python3 scripts/batch_map.py --dump /tmp/dump.json \
+  --window '2026-09-24T12:00|2026-09-24T12:20|efaktur' \
+  --window '2026-09-24T13:00|2026-09-26T23:59|scans' <SPREADSHEET_ID>
+```
+
+- Pulls `standard_json` per doc from the extractor API (window-based, cached in `/tmp/batch_map_docs.json`; refresh per-document after OCR completes).
+- Routes by type: e-Faktur → 3-layout header+item parser (incl. PPN-dibebaskan); scan booklets → per-vendor page classifier → Faktur Penjualan / PO Customer / Tanda Terima / Surat Jalan tabs.
+- **Never invents values.** Every row carries provenance `p<page> <filename>`; unparseable pages land in `OCR Mapping Review` with raw text, not in data tabs. Arithmetic gate (`qty×harga=jumlah`, Σitem=footer) labels rows `PASS` / `REVIEW-ARITH` (`OCR_NUMERIC_VERIFY=0` keeps values verbatim without visual re-check).
+- Tidy filter: placeholder/header-only rows are never written (user rule: "if it doesn't make sense, don't include rows at all").
+- Writes to the **copy** only; template untouched; sheet id kept in `copy_sid.txt`.
+
+**Self-learning vendor rules** — `scripts/vendor_rules.json`: `self_companies` (PT Sarana Abadi Makmur Bersama is OUR company, never a vendor), `junk` patterns (OCR label bleed like `PT ORDER DATE`), `learned_po_vendor` memory (PO→vendor, grows every run), `canon_vendor()` name normalization.
+
+**Self-learning variant KB (llm-wiki pattern)** — `scripts/knowledge.py` + `knowledge/`: unit of knowledge = layout variant (item-table column signature × company). Each run *applies* promoted semantics before writing (relabels `REVIEW-ARITH → PASS-LEARNED` only on exact arithmetic proof; OCR digit-confusion price fixes only when the rule was seen ≥2× in the same variant and the corrected value re-fits exactly) and *learns* after a successful write. `knowledge/companies/*.md` is the human-readable wiki (evidence, promotions, contradictions); `knowledge/INDEX.md` lists companies. Promoted today: `qty=carton*isi+pcs` for the SAMB sales booklet (1.988 proven rows). Nothing is ever corrected without an exact arithmetic proof.
+
+**Verification** — `scripts/read_sheet.py` (live read-back → `/tmp/sheet_now.json`) + `scripts/verify_sheet.py` (write integrity, Σitem=footer per faktur, PASS-LEARNED re-proof, provenance within real page counts, vendor rules, empty-row sweep, window coverage). Last full run 2026-09-30: **0 real problems**; snapshots committed under `snapshots/` for manual review. TT quirks fixed: 67 header-bleed dates repaired from raw page text, 314 date formats normalized.
+
 **Restore dedupe after testing:** `INGEST_ALLOW_DUP=0` in `.env` → `docker compose up -d extractor` → same batch upload must show `SKIPPED_DUPLICATE`; run `python3 tests/test_batch_e2e.py`.
 
 **Edit a workflow (the n8n trap — learned the hard way):** production runs the **published** version, not the one you edit. After any change: Publish button top-right, or the CLI sequence above + `docker restart dp-n8n`. A webhook returning stale behavior = almost always unpublish, not code.
@@ -142,7 +167,7 @@ docker exec dp-db psql -U pipeline -d n8n -Atc "SELECT id,status FROM execution_
 **House rules:** never commit `.env`, keys, or DB dumps (`backups/` is gitignored) — pre-push history scans enforced; bind host IPs in `docker-compose.yml` (this box exposes on localhost + Tailscale IP only).
 
 ## Pointers
-- Operations & UI walkthrough: `USAGE.md` · UI test suite (U-series): `TESTING.md` · OCR-focused playbook (T1–T8): `OCR_TEST_PLAYBOOK.md`
+- Operations & UI walkthrough: `USAGE.md` · UI test suite (U-series) + batch mapping suite (M-series §9): `TESTING.md` · OCR-focused playbook (T1–T8): `OCR_TEST_PLAYBOOK.md`
 - MVP AR design: `MVP_AR_RECON_DESIGN.md` · Ten-document pilot and mixed-PDF child test: `MVP_10_DOCUMENT_TEST.md` · Mixed-PDF live test: `TESTING.md` U13
 - Receiving contract: `TESTING.md` §4 · Real endpoint switch: set `TARGET_API_URL`
 - n8n workflows source of truth: `n8n/*.json` (keep committed copies in sync with live DB after every publish)
