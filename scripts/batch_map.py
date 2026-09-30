@@ -429,6 +429,92 @@ def main():
                 r[1] = win; r[10] = (r[10] or '') + '|VENDOR-ALIGNED'; _fixed_conf += 1
     if _fixed_conf: print('PO vendor conflicts aligned:', _fixed_conf, flush=True)
 
+    # --- split glued PO item rows: whole OCR line got crammed into Product Code cell.
+    # Find qty/price/total triple at the tail of the Product string; accept ONLY when
+    # qty*price ~= total proves the parse (never invent). Remaining tokens -> UON if unit-like.
+    def _num_any(s):
+        s = s.strip().rstrip('.%').strip()
+        if not re.match(r'^\d[\d.,]*$', s):
+            return None
+        if '.' in s and ',' in s:
+            try: return float(s.replace(',', ''))
+            except ValueError: return None
+        if ',' in s and re.match(r'^\d{1,3}(,\d{3})+(\.\d+)?$', s):
+            return float(s.replace(',', ''))
+        if ',' in s and re.match(r'^\d+,\d{2}$', s):
+            return float(s.replace(',', '.'))
+        if '.' in s and re.match(r'^\d{1,3}(\.\d{3})+$', s):
+            return float(s.replace('.', ''))
+        try: return float(s)
+        except ValueError: return None
+
+    UNIT_TOK = r'(?:LNN|LST|LSN|PCS|PC|BOX|CTN|CRT|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR)'
+    split_c = 0
+    for r in sheets['PO Customer']:
+        if len(r) < 11 or not (r[3] or '').strip():
+            continue
+        if any(str(r[i]).strip() for i in (4, 6, 8)):
+            continue  # already split — never overwrite parsed fields
+        toks = (r[3] or '').split()
+        if len(toks) < 4:
+            continue
+        tail = toks[-9:]
+        i0 = len(toks) - len(tail)
+        best = None
+        for ii in range(len(tail)):
+            if not re.fullmatch(r'\d{1,5}', tail[ii]):
+                continue
+            q = float(tail[ii])
+            if q <= 0:
+                continue
+            # numeric tail must run to the last token (no words after qty zone)
+            if not all(re.match(r'^\d[\d.,%]*$', t) for t in tail[ii:]):
+                continue
+            for jj in range(ii + 1, len(tail)):
+                p = _num_any(tail[jj])
+                if not p or p <= 0:
+                    continue
+                t = _num_any(tail[-1])
+                if t and t > 0 and tail[jj] != tail[-1] and abs(q * p - t) <= max(2, t * 0.002):
+                    best = (ii, jj); break
+            if best:
+                break
+        if not best:
+            continue
+        ii, jj = best
+        qty, price, total = tail[ii], tail[jj], tail[-1]
+        desc = toks[:i0 + ii]
+        uon = ''
+        for tk in reversed(toks[max(0, i0 + ii - 4):i0 + ii]):
+            if re.fullmatch(UNIT_TOK, tk.upper()):
+                uon = tk.upper(); desc = [t for t in desc if t != tk]; break
+        r[3] = ' '.join(desc).strip()
+        r[4], r[5], r[6], r[8] = qty, uon, price, total
+        r[10] = (r[10] or 'OCR_ITEM') + '|SPLIT-GLUED'
+        split_c += 1
+    if split_c:
+        print('PO glued-row split:', split_c, flush=True)
+
+    # --- normalize qty/UON per destination table: unit text belongs in UON, not Qty ---
+    UNITS = r'(?:CTN|CRT|CT|PCS|PC|BOX|LNN|LSN|LST|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR|BAL)'
+    qty_norm = 0
+    for r in sheets['PO Customer']:
+        if len(r) < 11:
+            continue
+        q = str(r[4] or '').strip()
+        if not q:
+            continue
+        m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s+({UNITS})', q, re.I)
+        if not m:
+            m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s*/\s*({UNITS})', q, re.I)
+        if m:
+            r[4] = m.group(1)
+            if not str(r[5]).strip():
+                r[5] = m.group(2).upper()
+            qty_norm += 1
+    if qty_norm:
+        print('PO qty/UON normalized:', qty_norm, flush=True)
+
     # post-audit: relabel arith-failing PO rows (never silently PASS corrupt numerics)
     def _n2(s):
         s=str(s).strip()
@@ -443,11 +529,11 @@ def main():
     for r in sheets['PO Customer']:
         pq,pu,pd_,pt=_n2(r[4]),_n2(r[6]),_n2(r[7]),_n2(r[8])
         if None in (pq,pu,pt) or r[10]=='OCR_PAGE_REVIEW': continue
-        _ptag='|'+'|'.join(x for x in str(r[10]).split('|') if x.startswith('PO-')) if 'PO-' in str(r[10]) else ''
+        _keep='|'+'|'.join(x for x in str(r[10]).split('|') if x.startswith(('PO-','SPLIT-'))) if '|' in str(r[10]) else ''
         if abs(pu*pq-(pd_ or 0)-pt)<=max(1.0,abs(pt)*0.001):
-            r[10]='MAPPED'+_ptag
+            r[10]='MAPPED'+_keep
         else:
-            r[10]='REVIEW-ARITH'+_ptag; po_fixed+=1
+            r[10]='REVIEW-ARITH'+_keep; po_fixed+=1
     fp_fixed=0
     for r in sheets['Faktur Penjualan']:
         if r[17]=='SUMMARY': continue
