@@ -6,11 +6,11 @@
    "sig": "disc#harga#kemasan#nama#qty",
    "doctype": "Faktur Penjualan",
    "sem": {
-    "qty=carton*isi+pcs": 1988,
-    "qty=first-number": 22
+    "qty=carton*isi+pcs": 4221,
+    "qty=first-number": 44
    },
    "conf": {
-    "10.647,00->10.847,00": 10,
+    "10.647,00->10.847,00": 20,
     "7.600,00->7.800,00": 2,
     "13.349,00->13.949,00": 2,
     "12.325,00->12.925,00": 2,
@@ -20,10 +20,12 @@
     "3.504,00->3.604,00": 2,
     "11.462,33->14.462,33": 2,
     "4.572,22->4.672,22": 2,
-    "6.001,97->6.081,97": 1,
-    "15.000,00->15.800,00": 1
+    "6.001,97->6.081,97": 3,
+    "15.000,00->15.800,00": 2
    },
    "contrad": [
+    "qty=first-number@p61 7000363400 - 70003",
+    "qty=first-number@p61 7000363400 - 70003",
     "qty=first-number@p61 7000363400 - 70003"
    ],
    "examples": [
@@ -31,8 +33,8 @@
     "p1 7000363700 - 7000363703",
     "p1 7000363700 - 7000363703"
    ],
-   "pass_": 1889,
-   "unexplained": 5724,
+   "pass_": 3997,
+   "unexplained": 11780,
    "promoted_sem": "qty=carton*isi+pcs"
   },
   "fbde3308365e": {
@@ -48,7 +50,7 @@
     "p120 7000363400 - 7000363499"
    ],
    "pass_": 0,
-   "unexplained": 12
+   "unexplained": 24
   },
   "3d4e19ebbd53": {
    "company": "SELF:SARANA ABADI MAKMUR BERSAMA",

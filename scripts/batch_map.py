@@ -402,6 +402,30 @@ def main():
         _pl = KB.build_page_lookup(corpus)
         sem_c, corr_c = KB.apply_to_sheets(dict(sheets), _pl)
         print('KB apply: sem-proven', sem_c, '| ocr-corrected', corr_c, flush=True)
+        # TT date repair: header text bleeding into Posting Date -> real date from raw page
+        ttf = 0
+        for r in sheets.get('Tanda Terima', []):
+            if len(r) > 9 and r[0] and not re.match(r'^[\d./]', str(r[0])):
+                mm = re.match(r'^p(\d+) (.*)$', r[8] or '')
+                d = ''
+                if mm:
+                    for l in _pl.get(mm.group(2).strip(), {}).get(int(mm.group(1)), []):
+                        if r[1] and str(r[1]) in l:
+                            dm = re.search(r'\d{2}[/.]\d{2}[/.]\d{4}', l)
+                            if dm: d = dm.group(0); break
+                r[0] = d; ttf += 1
+        # normalize valid-but-varied TT date formats (15-SEP-26 / 16/09/26 09:36:53)
+        MON = {m: f'{i+1:02d}' for i, m in enumerate('JAN FEB MAR APR MEI JUN JUL AGU SEP OKT NOV DES'.split())}
+        for r in sheets.get('Tanda Terima', []):
+            if len(r) > 9 and r[0]:
+                s = str(r[0]).upper()
+                m1 = re.match(r'^(\d{2})-([A-Z]{3})-(\d{2})$', s)
+                m2 = re.match(r'^(\d{2})[/.](\d{2})[/.](\d{2})(\s.*)?$', s)
+                if m1 and m1.group(2) in MON:
+                    r[0] = f'{m1.group(1)}/{MON[m1.group(2)]}/20{m1.group(3)}'
+                elif m2:
+                    r[0] = f'{m2.group(1)}/{m2.group(2)}/20{m2.group(3)}'
+        print('TT date-repair:', ttf, flush=True)
     except Exception as e:
         print('KB apply skipped:', repr(e), flush=True)
 
