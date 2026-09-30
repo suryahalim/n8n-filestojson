@@ -317,9 +317,9 @@ def record_po_variants(sheets):
     data = rows[1:] if (rows and rows[0] and 'Purchase' in str(rows[0][0])) else rows
     added = 0
     for r in data:
-        if len(r) < 11 or not str(r[0]).strip():
+        if len(r) < 12 or not str(r[0]).strip():
             continue
-        st = str(r[10])
+        st = str(r[11])
         if 'MAPPED' not in st and 'OCR_ITEM' not in st:
             continue
         comp = po_company(r[1])

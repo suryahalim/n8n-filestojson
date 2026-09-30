@@ -298,6 +298,22 @@ def main():
                 continue
         # scan booklet -> existing per-vendor page classifiers
         sh, rv = build(pages)
+        # --- schema remap (2026-09-30): PO Customer D='Product Code' + new E='Product Name'
+        _po2 = []
+        for r in sh.get('PO Customer', []):
+            r = list(r)
+            prod = str(r[3] or '').strip()
+            m = re.match(r'^(\d{6,14})\s+(.+)$', prod, re.S)
+            if m:
+                code, name = m.group(1), m.group(2)
+                m2 = re.match(r'^(\d{10,14})\)?\s+(.*)$', name)  # barcode glued after code
+                if m2 and len(m2.group(1)) >= 10:
+                    name = f'({m2.group(1)}) ' + m2.group(2)
+            else:
+                code, name = '', prod   # no numeric code in source -> blank, never fake it
+            r = r[:3] + [code, name] + r[4:]
+            _po2.append(r)
+        sh['PO Customer'] = _po2
         # --- self-company vendor rule (learned): OUR company is not a vendor ---
         rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor_rules.json')
         try:
@@ -346,18 +362,18 @@ def main():
             return '', ''
         po_bf = po_bi = 0
         for r in sh.get('PO Customer', []):
-            if len(r) >= 11 and not str(r[0]).strip() and isinstance(r[9], int) \
-               and 'OCR_PAGE_REVIEW' not in str(r[10]):
-                pv, how = _po_for_page(r[9])
+            if len(r) >= 12 and not str(r[0]).strip() and isinstance(r[10], int) \
+               and 'OCR_PAGE_REVIEW' not in str(r[11]):
+                pv, how = _po_for_page(r[10])
                 if pv:
                     if how == 'INHERIT':
                         # safety: only inherit when this row's vendor appears on the source page
-                        _ptxt = page_by_no.get(r[9], '')
+                        _ptxt = page_by_no.get(r[10], '')
                         _vend = str(r[1]).strip()
                         if _vend and _vend[:12].upper().replace('.', '') not in _ptxt.upper().replace('.', ''):
                             continue
                     r[0] = pv
-                    r[10] = (r[10] or '') + ('|PO-BACKFILL' if how == 'PAGE' else '|PO-INHERIT')
+                    r[11] = (r[11] or '') + ('|PO-BACKFILL' if how == 'PAGE' else '|PO-INHERIT')
                     po_bf += how == 'PAGE'; po_bi += how == 'INHERIT'
         if po_bf or po_bi:
             _st = (doc['filename'] or did[:8]).rsplit('.pdf', 1)[0][:24]
@@ -365,15 +381,15 @@ def main():
         learned = RULES.setdefault('learned_po_vendor', {})
         junk_all = re.compile('|'.join(RULES.get('junk') or [r'(?!)']))
         for r in sh.get('PO Customer', []):
-            if len(r) < 10: continue
+            if len(r) < 11: continue
             if junk_all.search(str(r[1])):
                 r[1] = ''   # never keep an OCR-label as vendor name
             if not self_re.search(str(r[1])):
                 continue
             po_key = str(r[0]).strip()
             if po_key and learned.get(po_key):
-                r[1] = learned[po_key]; r[10] = (r[10] or '') + '|VENDOR-FIXED'; continue
-            t = page_by_no.get(r[9], '') if isinstance(r[9], int) else ''
+                r[1] = learned[po_key]; r[11] = (r[11] or '') + '|VENDOR-FIXED'; continue
+            t = page_by_no.get(r[10], '') if isinstance(r[10], int) else ''
             cands = []
             for m in comp_re.finditer(t):
                 n = canon_vendor(m.group(0))
@@ -389,18 +405,18 @@ def main():
                 pick = cands[0]
             if pick:
                 r[1] = pick
-                r[10] = (r[10] or '') + '|VENDOR-FIXED'
+                r[11] = (r[11] or '') + '|VENDOR-FIXED'
                 if po_key: learned[po_key] = pick
             else:
                 # cannot attribute a real third-party vendor -> blank the self-company
                 # (row then only survives tidy if it carries real item data)
                 r[1] = ''
-                r[10] = (r[10] or '') + '|VENDOR-UNRESOLVED'
+                r[11] = (r[11] or '') + '|VENDOR-UNRESOLVED'
         RULES['self_companies'] = list(set(RULES.get('self_companies') or []) | {r'SARANA\s+ABADI\s+MAKMUR'})
         json.dump(RULES, open(rules_path, 'w'), indent=1, ensure_ascii=False)
         # ----------------------------------------------------------------------
         stem = (doc['filename'] or did[:8]).rsplit('.pdf',1)[0][:28]
-        SPIDX = {'Faktur Penjualan': 15, 'PO Customer': 9, 'Tanda Terima': 8,
+        SPIDX = {'Faktur Penjualan': 15, 'PO Customer': 10, 'Tanda Terima': 8,
                  'Surat Jalan': 3, 'Dokumen Pelunasan': 12}
         for k, v in sh.items():
             for row in v:
@@ -426,7 +442,7 @@ def main():
         win = ctr.most_common(1)[0][0]
         for r in sheets['PO Customer']:
             if r[0] == po and r[1] and r[1] != win:
-                r[1] = win; r[10] = (r[10] or '') + '|VENDOR-ALIGNED'; _fixed_conf += 1
+                r[1] = win; r[11] = (r[11] or '') + '|VENDOR-ALIGNED'; _fixed_conf += 1
     if _fixed_conf: print('PO vendor conflicts aligned:', _fixed_conf, flush=True)
 
     # --- split glued PO item rows: whole OCR line got crammed into Product Code cell.
@@ -451,11 +467,11 @@ def main():
     UNIT_TOK = r'(?:LNN|LST|LSN|PCS|PC|BOX|CTN|CRT|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR)'
     split_c = 0
     for r in sheets['PO Customer']:
-        if len(r) < 11 or not (r[3] or '').strip():
+        if len(r) < 12 or not (r[4] or '').strip():
             continue
-        if any(str(r[i]).strip() for i in (4, 6, 8)):
+        if any(str(r[i]).strip() for i in (5, 7, 9)):
             continue  # already split — never overwrite parsed fields
-        toks = (r[3] or '').split()
+        toks = (r[4] or '').split()
         if len(toks) < 4:
             continue
         tail = toks[-9:]
@@ -488,9 +504,15 @@ def main():
         for tk in reversed(toks[max(0, i0 + ii - 4):i0 + ii]):
             if re.fullmatch(UNIT_TOK, tk.upper()):
                 uon = tk.upper(); desc = [t for t in desc if t != tk]; break
-        r[3] = ' '.join(desc).strip()
-        r[4], r[5], r[6], r[8] = qty, uon, price, total
-        r[10] = (r[10] or 'OCR_ITEM') + '|SPLIT-GLUED'
+        code = ''
+        # code may have stayed in the name (remap missed it, e.g. two leading numbers)
+        mcode = re.match(r'^(\d{6,14})\s+(.*)$', ' '.join(desc), re.S)
+        if mcode and not str(r[3]).strip():
+            code, desc = mcode.group(1), [mcode.group(2)]
+        r[3] = (str(r[3]).strip() or code)
+        r[4] = ' '.join(desc).strip()
+        r[5], r[6], r[7], r[9] = qty, uon, price, total
+        r[11] = (r[11] or 'OCR_ITEM') + '|SPLIT-GLUED'
         split_c += 1
     if split_c:
         print('PO glued-row split:', split_c, flush=True)
@@ -499,18 +521,18 @@ def main():
     UNITS = r'(?:CTN|CRT|CT|PCS|PC|BOX|LNN|LSN|LST|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR|BAL)'
     qty_norm = 0
     for r in sheets['PO Customer']:
-        if len(r) < 11:
+        if len(r) < 12:
             continue
-        q = str(r[4] or '').strip()
+        q = str(r[5] or '').strip()
         if not q:
             continue
         m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s+({UNITS})', q, re.I)
         if not m:
             m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s*/\s*({UNITS})', q, re.I)
         if m:
-            r[4] = m.group(1)
-            if not str(r[5]).strip():
-                r[5] = m.group(2).upper()
+            r[5] = m.group(1)
+            if not str(r[6]).strip():
+                r[6] = m.group(2).upper()
             qty_norm += 1
     if qty_norm:
         print('PO qty/UON normalized:', qty_norm, flush=True)
@@ -527,13 +549,13 @@ def main():
         except Exception: return None
     po_fixed=0
     for r in sheets['PO Customer']:
-        pq,pu,pd_,pt=_n2(r[4]),_n2(r[6]),_n2(r[7]),_n2(r[8])
-        if None in (pq,pu,pt) or r[10]=='OCR_PAGE_REVIEW': continue
-        _keep='|'+'|'.join(x for x in str(r[10]).split('|') if x.startswith(('PO-','SPLIT-'))) if '|' in str(r[10]) else ''
+        pq,pu,pd_,pt=_n2(r[5]),_n2(r[7]),_n2(r[8]),_n2(r[9])
+        if None in (pq,pu,pt) or r[11]=='OCR_PAGE_REVIEW': continue
+        _keep='|'+'|'.join(x for x in str(r[11]).split('|') if x.startswith(('PO-','SPLIT-'))) if '|' in str(r[11]) else ''
         if abs(pu*pq-(pd_ or 0)-pt)<=max(1.0,abs(pt)*0.001):
-            r[10]='MAPPED'+_keep
+            r[11]='MAPPED'+_keep
         else:
-            r[10]='REVIEW-ARITH'+_keep; po_fixed+=1
+            r[11]='REVIEW-ARITH'+_keep; po_fixed+=1
     fp_fixed=0
     for r in sheets['Faktur Penjualan']:
         if r[17]=='SUMMARY': continue
@@ -584,6 +606,30 @@ def main():
     except Exception as e:
         print('KB apply skipped:', repr(e), flush=True)
 
+    # --- deep-verify overrides (loop-until-converged engine, knowledge/overrides.json) ---
+    try:
+        _ovr_p = os.path.expanduser('~/doc-pipeline/knowledge/overrides.json')
+        _ovr = json.load(open(_ovr_p)) if os.path.exists(_ovr_p) else {}
+    except Exception:
+        _ovr = {}
+    if _ovr:
+        n_ov = 0
+        for r in sheets['Faktur Penjualan']:
+            if r[17] not in ('REVIEW-ARITH', 'REVIEW'):
+                continue
+            _k = f"FP|{r[15]}|{r[0]}|{(r[3] or '')[:24]}"
+            _o = _ovr.get(_k)
+            if not _o:
+                continue
+            for _f, _v in (_o.get('fields') or {}).items():
+                _ix = {'qty': 4, 'harga': 5, 'jumlah': 11}.get(_f)
+                if _ix is not None:
+                    r[_ix] = _v
+            r[17] = 'PASS-DEEP'
+            r[16] = _o['stage'] + '|' + _o['evidence'][:110]
+            n_ov += 1
+        print('deep overrides applied:', n_ov, flush=True)
+
     # TIDY: never write placeholder/semantics-less rows to data tabs.
     # - rows whose Mapping/Review status is OCR_PAGE_REVIEW (page-level header leftovers)
     # - rows where every non-provenance cell is empty
@@ -605,7 +651,7 @@ def main():
     # PO Customer: a row needs a PO number OR item data to mean anything
     before=len(sheets['PO Customer'])
     sheets['PO Customer']=[r for r in sheets['PO Customer']
-        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(3,9))]
+        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(3,10))]
     if len(sheets['PO Customer'])!=before:
         print('tidy PO Customer (no-PO-no-item) ->',len(sheets['PO Customer']), flush=True)
     # Faktur Penjualan: drop rows where all data cols empty (confidence/review status only)

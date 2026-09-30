@@ -137,6 +137,7 @@ python3 scripts/batch_map.py --dump /tmp/dump.json \
 
 - Pulls `standard_json` per doc from the extractor API (window-based, cached in `/tmp/batch_map_docs.json`; refresh per-document after OCR completes).
 - Routes by type: e-Faktur → 3-layout header+item parser (incl. PPN-dibebaskan); scan booklets → per-vendor page classifier → Faktur Penjualan / PO Customer / Tanda Terima / Surat Jalan tabs.
+- **PO Customer columns (schema 2026-09-30):** `Purchase Order No | Vendor | PPN | Product Code | Product Name | Qty | UON | Unit Price | Discount | Total | Source Page | Mapping Status` — 12 cols; Product Code holds ONLY the numeric code (blank if the document shows none — never faked), Product Name the description. Row-level stages: glued OCR lines are split via arithmetic proof (`SPLIT-GLUED`), qty units normalized (`2 CT` → Qty=2, UON=CT).
 - **Never invents values.** Every row carries provenance `p<page> <filename>`; unparseable pages land in `OCR Mapping Review` with raw text, not in data tabs. Arithmetic gate (`qty×harga=jumlah`, Σitem=footer) labels rows `PASS` / `REVIEW-ARITH` (`OCR_NUMERIC_VERIFY=0` keeps values verbatim without visual re-check).
 - Tidy filter: placeholder/header-only rows are never written (user rule: "if it doesn't make sense, don't include rows at all").
 - Writes to the **copy** only; template untouched; sheet id kept in `copy_sid.txt`.
