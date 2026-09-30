@@ -1,5 +1,6 @@
 {
  "self_companies": [
+  "MAKMUR\\s+B\\w{0,6}SAMA|SAHANA\\s+ADIJ",
   "SARANA\\s+ABADI\\s+MAKMUR"
  ],
  "junk": [
@@ -12,7 +13,8 @@
   "^PT\\.?\\s*Nama",
   "^PT\\.?\\s*No\\.?\\s",
   "^PT\\.?\\s*ORDER\\s+DATE",
-  "^PT\\.?\\s*Dan\\s"
+  "^PT\\.?\\s*Dan\\s",
+  "^PD\\.?\\s*No\\b"
  ],
  "learned_po_vendor": {
   "1001000125418": "PT AEON INDONESIA",
@@ -65,6 +67,27 @@
   "CH9Q25510": "PT. INDOMARKO PRAMATAMA D.C CABANG TANGERANG",
   "Page : 1 / 1": "PT Supra Boga Lestari Tbk",
   "CH9Q04448": "PT. INDOMARCO PRISMATAMA",
-  "3014034489": "PT Supra Boga Lestari Tbk"
+  "3014034489": "PT Supra Boga Lestari Tbk",
+  "8010.PL.26.009124": "PT HOKKY TE IT",
+  "8010.PL.26.009127": "PT HOKKY TE IT",
+  "TA05PO1409260315": "PT. MITRA BELANJA ANDA",
+  "3014007185": "PT Supra Boga Lestari Tbk",
+  "3014035166": "PT Supra Boga Lestari Tbk",
+  "3014031637": "PT Supra Boga Lestari Tbk",
+  "3014031639": "PT Supra Boga Lestari Tbk F-MRD-",
+  "3014022728": "PT Supra Boga Lestari Tbk",
+  "3014024084": "PT Supra Boga Lestari Tbk",
+  "3014022205": "PT Supra Boga Lestari Tbk",
+  "9918.PL.26.044220": "PT. INDAH",
+  "3014031079": "PT Supra Boga Lestari Tbk",
+  "3014035541": "PT Supra Boga Lestari Tbk",
+  "9916.PL.26.030306": "PT. MITRA BELANJA ANDA",
+  "3014037174": "PT Supra Boga Lestari Tbk",
+  "3014037011": "PT Supra Boga Lestari Tbk",
+  "3014033614": "PT Supra Boga Lestari Tbk",
+  "JU14651078": "PT Supra Boga Lestari Tbk",
+  "9908.PL.26.049297": "PT. MITRA BELANJA ANDA",
+  "3014020236": "PT Supra Boga Lestari Tbk",
+  "GH9QD4210": "PT INDOMARCO PRISMATAMA"
  }
 }

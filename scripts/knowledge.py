@@ -288,6 +288,56 @@ def apply_to_sheets(sheets, page_lookup):
                             break
     return sem_c, corr_c
 
+PO_SHAPE_RX = [
+    ('dotted', re.compile(r'^\d{4}\.[A-Z]{2,3}\.\d{2}\.\d{5,7}$')),
+    ('dash-code', re.compile(r'^[A-Z]{2,10}\d{2,6}[A-Z]*-\d{6,9}$')),
+    ('bare-10', re.compile(r'^\d{10}$')),
+    ('bare-13/15', re.compile(r'^\d{13,15}$')),
+    ('bare-6/12', re.compile(r'^\d{6,12}$')),
+    ('alpha-mix', re.compile(r'^[A-Z0-9._/-]{8,}$')),
+]
+
+def po_shape(v):
+    for name, rx in PO_SHAPE_RX:
+        if rx.match(v):
+            return name
+    return 'other'
+
+def record_po_variants(sheets):
+    """PO-number FORMAT registry per company (self-learning, additive).
+
+    Every mapped PO row teaches which shape its issuer uses (GrandLucky dotted
+    '9919.PL.26.034256', Gramedia dash 'POGAM2609-00024628', SAP bare-10, Aeon
+    bare-13...). Stored in knowledge/po_formats.json: company -> shape -> count +
+    example. Lets future runs recognize an issuer's PO even when the label text is
+    OCR-mangled. Only counts real, arithmetically-mapped rows (MAPPED/OCR_ITEM)."""
+    p = os.path.join(KB_DIR, 'po_formats.json')
+    reg = json.load(open(p)) if os.path.exists(p) else {}
+    rows = sheets.get('PO Customer') or []
+    data = rows[1:] if (rows and rows[0] and 'Purchase' in str(rows[0][0])) else rows
+    added = 0
+    for r in data:
+        if len(r) < 11 or not str(r[0]).strip():
+            continue
+        st = str(r[10])
+        if 'MAPPED' not in st and 'OCR_ITEM' not in st:
+            continue
+        comp = po_company(r[1])
+        shape = po_shape(r[0])
+        e = reg.setdefault(comp, {}).setdefault(shape, {'count': 0, 'example': r[0]})
+        e['count'] += 1
+        added += 1
+    os.makedirs(KB_DIR, exist_ok=True)
+    json.dump(reg, open(p, 'w'), indent=1, ensure_ascii=False)
+    return added
+
+def po_company(r1):
+    """Company label for the PO registry: canonical self-name or cleaned vendor name."""
+    u = re.sub(r'\s+', ' ', str(r1 or '').upper()).strip()
+    if re.search(r'ABADI\s*MAKMUR|SARANA ABADI', u):
+        return 'SELF:SARANA ABADI MAKMUR BERSAMA'
+    return u[:50] or 'UNATTRIBUTED'
+
 def render_wiki(kb=None):
     kb = kb or load_kb()
     os.makedirs(WIKI, exist_ok=True)

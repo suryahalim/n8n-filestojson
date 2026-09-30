@@ -308,6 +308,60 @@ def main():
         junk_re = re.compile('|'.join(RULES.get('junk') or [])) if RULES.get('junk') else None
         comp_re = re.compile(r'(?:PT\.?\s+|CV\.?\s+|PD\.?\s+)([A-Z][A-Za-z .,&\'-]{5,45})')
         page_by_no = {int(p.get('page', 0)): (p.get('text') or '') for p in pages}
+        # --- PO number backfill: item parsers may miss the header PO# (e.g. GrandLucky
+        # 'PO# : 9919.PL.26.034256', Gramedia 'Purchase Order No. POGAM..'). Fill from the
+        # page's own label; continuation pages inherit the nearest previous labeled page
+        # (max 3 ahead) ONLY when the vendor matches — never cross-contaminate POs.
+        PO_LABS = [
+            r'PO[#\s]*[:=]\s*([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'Purchase Order No[.\s]*[:=]?\s+([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'PURCHASE\s+ORDER\s*\n+\s*(\d{6,12})\b',
+            r'NO[.\s]*PO\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'Nomor\s*PO\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'PO\s*No\.?\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'PO\s*NUMBER\s*[:=]?\s*([A-Z0-9][A-Z0-9./_-]{5,27})',
+            r'ORDER\s*NO\.?\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]{6,27})',
+            r'PR\s*No\s*[:=\n]\s*(\d{6,12})',
+            r'[:=]\s*(\d{10})\b(?=[^\n]*Purch\.?\s*Grp)',
+        ]
+        MONTH_RE = re.compile(r'JAN|FEB|MAR|APR|MEI|JUN|JUL|AGU|SEP|OKT|NOV|DES|OCT|DEC', re.I)
+        page_po = {}
+        for _pno, _t in page_by_no.items():
+            for _rx in PO_LABS:
+                _hit = ''
+                for _mm in re.finditer(_rx, _t, re.I):
+                    _v = _mm.group(1).strip().rstrip('.,')
+                    if re.search(r'\d{5,}', _v) and not MONTH_RE.search(_v):
+                        _hit = _v[:28]; break
+                if _hit:
+                    page_po[_pno] = _hit; break
+        def _po_for_page(pno):
+            v = page_po.get(pno)
+            if v:
+                return v, 'PAGE'
+            for q in sorted((q for q in page_po if q < pno), reverse=True):
+                if pno - q <= 3:
+                    return page_po[q], 'INHERIT'
+                break
+            return '', ''
+        po_bf = po_bi = 0
+        for r in sh.get('PO Customer', []):
+            if len(r) >= 11 and not str(r[0]).strip() and isinstance(r[9], int) \
+               and 'OCR_PAGE_REVIEW' not in str(r[10]):
+                pv, how = _po_for_page(r[9])
+                if pv:
+                    if how == 'INHERIT':
+                        # safety: only inherit when this row's vendor appears on the source page
+                        _ptxt = page_by_no.get(r[9], '')
+                        _vend = str(r[1]).strip()
+                        if _vend and _vend[:12].upper().replace('.', '') not in _ptxt.upper().replace('.', ''):
+                            continue
+                    r[0] = pv
+                    r[10] = (r[10] or '') + ('|PO-BACKFILL' if how == 'PAGE' else '|PO-INHERIT')
+                    po_bf += how == 'PAGE'; po_bi += how == 'INHERIT'
+        if po_bf or po_bi:
+            _st = (doc['filename'] or did[:8]).rsplit('.pdf', 1)[0][:24]
+            print(f'  PO backfill {_st}: page-label {po_bf} + inherit {po_bi}', flush=True)
         learned = RULES.setdefault('learned_po_vendor', {})
         junk_all = re.compile('|'.join(RULES.get('junk') or [r'(?!)']))
         for r in sh.get('PO Customer', []):
@@ -361,6 +415,20 @@ def main():
     for r in review:
         if r[1] != 'Faktur Pajak (e-Faktur digital)' and r[0] not in [x[0] for x in sheets['Faktur Pajak']]:
             pass  # review rows keep page numbers; Source File distinguishes
+    # PO->vendor consistency: one PO number = one vendor. When the memory (or majority)
+    # disagrees with a store-outlet name on some page, align to the majority vendor.
+    _pv = collections.defaultdict(collections.Counter)
+    for r in sheets['PO Customer']:
+        if r[0] and r[1]: _pv[r[0]][r[1]] += 1
+    _fixed_conf = 0
+    for po, ctr in _pv.items():
+        if len(ctr) < 2: continue
+        win = ctr.most_common(1)[0][0]
+        for r in sheets['PO Customer']:
+            if r[0] == po and r[1] and r[1] != win:
+                r[1] = win; r[10] = (r[10] or '') + '|VENDOR-ALIGNED'; _fixed_conf += 1
+    if _fixed_conf: print('PO vendor conflicts aligned:', _fixed_conf, flush=True)
+
     # post-audit: relabel arith-failing PO rows (never silently PASS corrupt numerics)
     def _n2(s):
         s=str(s).strip()
@@ -375,10 +443,11 @@ def main():
     for r in sheets['PO Customer']:
         pq,pu,pd_,pt=_n2(r[4]),_n2(r[6]),_n2(r[7]),_n2(r[8])
         if None in (pq,pu,pt) or r[10]=='OCR_PAGE_REVIEW': continue
+        _ptag='|'+'|'.join(x for x in str(r[10]).split('|') if x.startswith('PO-')) if 'PO-' in str(r[10]) else ''
         if abs(pu*pq-(pd_ or 0)-pt)<=max(1.0,abs(pt)*0.001):
-            r[10]='MAPPED'
+            r[10]='MAPPED'+_ptag
         else:
-            r[10]='REVIEW-ARITH'; po_fixed+=1
+            r[10]='REVIEW-ARITH'+_ptag; po_fixed+=1
     fp_fixed=0
     for r in sheets['Faktur Penjualan']:
         if r[17]=='SUMMARY': continue
@@ -447,6 +516,12 @@ def main():
         if k in sheets:
             before=len(sheets[k]); sheets[k]=_tidy(k, sheets[k])
             print('tidy',k,before,'->',len(sheets[k]), flush=True)
+    # PO Customer: a row needs a PO number OR item data to mean anything
+    before=len(sheets['PO Customer'])
+    sheets['PO Customer']=[r for r in sheets['PO Customer']
+        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(3,9))]
+    if len(sheets['PO Customer'])!=before:
+        print('tidy PO Customer (no-PO-no-item) ->',len(sheets['PO Customer']), flush=True)
     # Faktur Penjualan: drop rows where all data cols empty (confidence/review status only)
     sheets['Faktur Penjualan']=[r for r in sheets['Faktur Penjualan']
         if any(str(r[i]).strip() for i in range(15))]
@@ -465,6 +540,12 @@ def main():
         # extend write to include custom headers: inject
         HEADERS['Faktur Pajak'] = FP_HEADERS
         print('written:', json.dumps(_ws(a.sid, dict(sheets), review), ensure_ascii=False))
+        # --- record PO-number label variants per company (self-learning registry) ---
+        try:
+            import knowledge as KBV
+            KBV.record_po_variants(dict(sheets))
+        except Exception as e:
+            print('PO variants record skipped:', repr(e), flush=True)
         # --- learn from what we just successfully mapped, then refresh wiki ---
         try:
             import knowledge as KB
