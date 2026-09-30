@@ -28,7 +28,7 @@ import json, os, re, sys, time, argparse, collections, urllib.request
 sys.path.insert(0, os.path.expanduser('~/doc-pipeline/scripts'))
 import knowledge as KB
 
-DUMP = '/tmp/dump_split4.json'
+DUMP = '/tmp/dump_new2.json'  # 12-col PO schema run (2026-09-30)
 CORPUS = '/tmp/batch_map_docs.json'
 OVR_P = os.path.join(KB.KB_DIR, 'overrides.json')
 QUE_P = os.path.join(KB.KB_DIR, 'dv_queue.json')
