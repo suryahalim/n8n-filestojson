@@ -14,6 +14,7 @@ log = logging.getLogger("extractor")
 from contextlib import contextmanager
 from pathlib import Path
 import psycopg2, psycopg2.extras
+from pydantic import BaseModel
 from fastapi.responses import FileResponse
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response
 import pika
@@ -691,6 +692,65 @@ def api_vision_ocr(png_bytes: bytes, cfg=None) -> str:
 
 # backwards-compat alias (older code paths)
 qwen_vision_ocr = api_vision_ocr
+
+
+def vision_ask_png(png_bytes: bytes, prompt: str, cfg=None) -> str:
+    """One vision call with an ARBITRARY prompt (deep-verify stages). Same config, no retrain."""
+    import urllib.request as ur
+    cfg = cfg or load_ocr_config()
+    if not cfg.get("key"):
+        raise HTTPException(500, "OCR API key not configured — set it at /view/settings")
+    body = json.dumps({
+        "model": cfg["model"], "max_tokens": 2200,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(png_bytes).decode()}},
+            {"type": "text", "text": prompt}]}]}).encode()
+    req = ur.Request(cfg["endpoint"], data=body, method="POST")
+    req.add_header("Authorization", "Bearer " + cfg["key"])
+    req.add_header("Content-Type", "application/json")
+    with ur.urlopen(req, timeout=180) as r:
+        d = json.load(r)
+    t = d["choices"][0]["message"]["content"]
+    if isinstance(t, list):
+        t = "\n".join(x.get("text", "") for x in t)
+    return (t or "").strip()
+
+
+class VisionAskIn(BaseModel):
+    page: int
+    prompt: str
+    dpi: int = 400
+
+
+@app.post("/documents/{doc_id}/vision_ask")
+def post_vision_ask(doc_id: str, body: VisionAskIn):
+    """Render ONE page at high DPI and ask the vision model anything. Evidence tool for
+    deep_verify.py loops. Reads the STORED original (never cached OCR text)."""
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT stored_path,mime FROM documents WHERE id=%s", (doc_id,))
+        d = cur.fetchone()
+    if not d or not os.path.exists(d["stored_path"]):
+        raise HTTPException(404, "file not found")
+    cfg = load_ocr_config()
+    td = tempfile.mkdtemp(prefix="vask-")
+    try:
+        if d["mime"] == "application/pdf":
+            prefix = os.path.join(td, "pg")
+            subprocess.run(["pdftoppm", "-png", "-r", str(body.dpi), "-f", str(body.page),
+                            "-l", str(body.page), d["stored_path"], prefix], check=True, timeout=240)
+            pngs = glob.glob(prefix + "*.png")
+            if not pngs:
+                raise HTTPException(422, f"page {body.page} rendered nothing")
+            png = pngs[0]
+        elif (d["mime"] or "").startswith("image/"):
+            png = d["stored_path"]
+        else:
+            raise HTTPException(415, "vision_ask supports pdf pages and images")
+        with open(png, "rb") as fh:
+            txt = vision_ask_png(fh.read(), body.prompt, cfg)
+        return {"document_id": doc_id, "page": body.page, "text": txt}
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def _sanitize_ocr_text(text: str) -> str:
