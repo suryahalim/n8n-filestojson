@@ -396,6 +396,15 @@ def main():
         else: r[17]='REVIEW-ARITH'; fp_fixed+=1
     print('arith relabel: PO',po_fixed,'FP',fp_fixed, flush=True)
 
+    # --- self-learning variant KB (llm-wiki pattern): apply learned semantics ---
+    try:
+        import knowledge as KB
+        _pl = KB.build_page_lookup(corpus)
+        sem_c, corr_c = KB.apply_to_sheets(dict(sheets), _pl)
+        print('KB apply: sem-proven', sem_c, '| ocr-corrected', corr_c, flush=True)
+    except Exception as e:
+        print('KB apply skipped:', repr(e), flush=True)
+
     # TIDY: never write placeholder/semantics-less rows to data tabs.
     # - rows whose Mapping/Review status is OCR_PAGE_REVIEW (page-level header leftovers)
     # - rows where every non-provenance cell is empty
@@ -432,6 +441,15 @@ def main():
         # extend write to include custom headers: inject
         HEADERS['Faktur Pajak'] = FP_HEADERS
         print('written:', json.dumps(_ws(a.sid, dict(sheets), review), ensure_ascii=False))
+        # --- learn from what we just successfully mapped, then refresh wiki ---
+        try:
+            import knowledge as KB
+            _pl = KB.build_page_lookup(corpus)
+            _kb, _prom = KB.learn_from_sheets(dict(sheets), _pl)
+            KB.render_wiki(_kb)
+            print(f'KB learn: variants={len(_kb["variants"])} promoted={_prom}', flush=True)
+        except Exception as e:
+            print('KB learn skipped:', repr(e), flush=True)
 
 if __name__ == '__main__':
     main()
