@@ -1,0 +1,11 @@
+{
+  "rules": {
+    "ppn": "PPN hanya 11% atau 1.1% — nilai persentase dicetak per item (kolom PPN) atau dihitung ppn/DPP; yang tercetak menang. Format: '11%' atau '1.1%'.",
+    "vendor_code": "Kolom Vendor Code = KODE SAMB di mata client (mis. label 'VENDOR : 300045730'). BUKAN nama. Hanya diisi dari label code numerik; tidak ada label = kosong.",
+    "po_issuer": "Kolom PO Issuer = customer-nya SAMB (penerbit PO). Selalu diawali 'PT' (contoh: PT Midi Utama Indonesia Tbk). Sumber berjenjang: (1) label WP/penerbit eksplisit, (2) baris PT non-self di header halaman, (3) alias brand->PT yang sudah terbukti koevidensi di issuers.json, (4) nama store tercetak + tag |ISSUER-STORENAME (belum terbukti PT).",
+    "total": "Total = Qty x Unit Price - Discount. Varian gross-Ppn diterima bila kolom JUMLAH memang PPN-incl: total == (qty*price-disc)*(1+ppn). Selain itu -> REVIEW-ARITH, tidak pernah dikarang.",
+    "self_never_issuer": "PT. SARANA ABADI MAKMUR BERSAMA dan varian OCR rusaknya (SAHANA ADIJ/MAJU/KIRANA ABADI MAKMUR, dst) tidak boleh jadi issuer maupun vendor — perusahaan sendiri."
+  },
+  "brand_aliases": {},
+  "alias_note": "brand_aliases diisi otomatis oleh learner (co-occurrence brand x PT non-self pada halaman yang sama, >=5 kejadian, konsisten) — bukan dari tebakan."
+}

@@ -16,6 +16,7 @@ header + data. Deterministic: never invents values; unread -> '' + REVIEW status
 import json, re, sys, os, argparse, collections, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from map_sheets import num, g, build, col_name, HEADERS  # reuse parsers + write helpers
+import po_v2 as PO2
 
 BASE = os.environ.get("EXTRACTOR_URL", "http://100.68.212.36:5000")
 
@@ -298,22 +299,41 @@ def main():
                 continue
         # scan booklet -> existing per-vendor page classifiers
         sh, rv = build(pages)
-        # --- schema remap (2026-09-30): PO Customer D='Product Code' + new E='Product Name'
-        _po2 = []
+        # --- PO v2 (2026-10-01): 13-col rules engine (po_v2). Merge: adapt old-parser rows to
+        # the new schema, then run the v2 chain ONLY on pages the old parsers produced nothing for.
+        _pby = {int(p.get('page', 0)): (p.get('text') or '') for p in pages}
+        _po13, _cov, _revs = [], set(), []
         for r in sh.get('PO Customer', []):
-            r = list(r)
-            prod = str(r[3] or '').strip()
-            m = re.match(r'^(\d{6,14})\s+(.+)$', prod, re.S)
-            if m:
-                code, name = m.group(1), m.group(2)
-                m2 = re.match(r'^(\d{10,14})\)?\s+(.*)$', name)  # barcode glued after code
-                if m2 and len(m2.group(1)) >= 10:
-                    name = f'({m2.group(1)}) ' + m2.group(2)
-            else:
-                code, name = '', prod   # no numeric code in source -> blank, never fake it
-            r = r[:3] + [code, name] + r[4:]
-            _po2.append(r)
-        sh['PO Customer'] = _po2
+            try:
+                _pno = int(r[9])
+            except (ValueError, TypeError):
+                _pno = None
+            _ar = PO2.adapt_old(list(r), _pby.get(_pno or 0, ''), r[9])
+            _po13.append(_ar)
+            if str(r[10]).startswith('OCR_PAGE_REVIEW'):
+                _revs.append((_pno, _ar))
+            elif _pno:
+                _cov.add(_pno)
+        _rev_by_page = collections.defaultdict(list)
+        for _pno, _ar in _revs:
+            if _pno:
+                _rev_by_page[_pno].append(_ar)
+        for _p in pages:
+            _pno = int(_p.get('page', 0))
+            if _pno in _cov:
+                continue
+            _pt = _p.get('text') or ''
+            if 'PURCHASE ORDER' not in _pt.upper() and not re.search(r'NO PO\s*:|PO ?Number|PO#|Nomor P?\.?O', _pt):
+                continue
+            try:
+                _new = PO2.build_page(_pt, _pno)
+            except Exception:
+                _new = []
+            if _new:
+                _po13 = [x for x in _po13 if x not in _rev_by_page.get(_pno, [])]
+                _po13 += _new
+        if _po13:
+            sh['PO Customer'] = _po13
         # --- self-company vendor rule (learned): OUR company is not a vendor ---
         rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor_rules.json')
         try:
@@ -362,61 +382,62 @@ def main():
             return '', ''
         po_bf = po_bi = 0
         for r in sh.get('PO Customer', []):
-            if len(r) >= 12 and not str(r[0]).strip() and isinstance(r[10], int) \
-               and 'OCR_PAGE_REVIEW' not in str(r[11]):
-                pv, how = _po_for_page(r[10])
+            if len(r) >= 13 and not str(r[0]).strip() and isinstance(r[11], int) \
+               and 'OCR_PAGE_REVIEW' not in str(r[12]):
+                pv, how = _po_for_page(r[11])
                 if pv:
                     if how == 'INHERIT':
-                        # safety: only inherit when this row's vendor appears on the source page
-                        _ptxt = page_by_no.get(r[10], '')
-                        _vend = str(r[1]).strip()
-                        if _vend and _vend[:12].upper().replace('.', '') not in _ptxt.upper().replace('.', ''):
+                        # safety: only inherit when this row's issuer/vendor appears on the source page
+                        _ptxt = page_by_no.get(r[11], '')
+                        _vend = (str(r[1]) + ' ' + str(r[2])).strip().upper()
+                        _core = re.sub(r'[^A-Z0-9]', '', _vend)[:10]
+                        if _core and _core not in re.sub(r'[^A-Z0-9]', '', _ptxt.upper()):
                             continue
                     r[0] = pv
-                    r[11] = (r[11] or '') + ('|PO-BACKFILL' if how == 'PAGE' else '|PO-INHERIT')
+                    r[12] = (r[12] or '') + ('|PO-BACKFILL' if how == 'PAGE' else '|PO-INHERIT')
                     po_bf += how == 'PAGE'; po_bi += how == 'INHERIT'
         if po_bf or po_bi:
             _st = (doc['filename'] or did[:8]).rsplit('.pdf', 1)[0][:24]
             print(f'  PO backfill {_st}: page-label {po_bf} + inherit {po_bi}', flush=True)
         learned = RULES.setdefault('learned_po_vendor', {})
         junk_all = re.compile('|'.join(RULES.get('junk') or [r'(?!)']))
+        # issuer hygiene under 13-col schema: col B=vendor CODE, col C=ISSUER (the customer).
+        # Old rule (self-company never a party) now applies to the ISSUER column.
         for r in sh.get('PO Customer', []):
-            if len(r) < 11: continue
-            if junk_all.search(str(r[1])):
-                r[1] = ''   # never keep an OCR-label as vendor name
-            if not self_re.search(str(r[1])):
+            if len(r) < 13: continue
+            if junk_all.search(str(r[2])):
+                r[2] = ''   # never keep an OCR-label as issuer
+            if not self_re.search(str(r[2])):
                 continue
             po_key = str(r[0]).strip()
             if po_key and learned.get(po_key):
-                r[1] = learned[po_key]; r[11] = (r[11] or '') + '|VENDOR-FIXED'; continue
-            t = page_by_no.get(r[10], '') if isinstance(r[10], int) else ''
+                r[2] = learned[po_key]; r[12] = (r[12] or '') + '|ISSUER-FIXED'; continue
+            t = page_by_no.get(r[11], '') if isinstance(r[11], int) else ''
             cands = []
             for m in comp_re.finditer(t):
                 n = canon_vendor(m.group(0))
                 if self_re.search(n): continue
                 if junk_re and junk_re.search(n): continue
                 if n not in cands: cands.append(n)
-            # prefer a company right after a vendor/supplier/kepada label
+            # prefer a company right after an issuer/WP/customer label
             pick = ''
-            lm = re.search(r'(?:Vendor|Supplier|Kepada|To)\s*[:.]?\s*((?:PT\.?|CV\.?)\s*[A-Z][A-Za-z .,&\'-]{4,45})', t, re.I)
+            lm = re.search(r'(?:WP|PO Issued By|Customer|Bill To)\s*[:.]?\s*((?:PT\.?|CV\.?)\s*[A-Z][A-Za-z .,&\'-]{4,45})', t, re.I)
             if lm and not self_re.search(lm.group(1)) and not (junk_re and junk_re.search(lm.group(1))):
                 pick = canon_vendor(lm.group(1))
             elif cands:
                 pick = cands[0]
             if pick:
-                r[1] = pick
-                r[11] = (r[11] or '') + '|VENDOR-FIXED'
+                r[2] = pick
+                r[12] = (r[12] or '') + '|ISSUER-FIXED'
                 if po_key: learned[po_key] = pick
             else:
-                # cannot attribute a real third-party vendor -> blank the self-company
-                # (row then only survives tidy if it carries real item data)
-                r[1] = ''
-                r[11] = (r[11] or '') + '|VENDOR-UNRESOLVED'
+                r[2] = ''
+                r[12] = (r[12] or '') + '|ISSUER-UNRESOLVED'
         RULES['self_companies'] = list(set(RULES.get('self_companies') or []) | {r'SARANA\s+ABADI\s+MAKMUR'})
         json.dump(RULES, open(rules_path, 'w'), indent=1, ensure_ascii=False)
         # ----------------------------------------------------------------------
         stem = (doc['filename'] or did[:8]).rsplit('.pdf',1)[0][:28]
-        SPIDX = {'Faktur Penjualan': 15, 'PO Customer': 10, 'Tanda Terima': 8,
+        SPIDX = {'Faktur Penjualan': 15, 'PO Customer': 11, 'Tanda Terima': 8,
                  'Surat Jalan': 3, 'Dokumen Pelunasan': 12}
         for k, v in sh.items():
             for row in v:
@@ -431,19 +452,26 @@ def main():
     for r in review:
         if r[1] != 'Faktur Pajak (e-Faktur digital)' and r[0] not in [x[0] for x in sheets['Faktur Pajak']]:
             pass  # review rows keep page numbers; Source File distinguishes
-    # PO->vendor consistency: one PO number = one vendor. When the memory (or majority)
-    # disagrees with a store-outlet name on some page, align to the majority vendor.
+    # PO->issuer consistency: one PO number = one issuer (and one vendor code).
     _pv = collections.defaultdict(collections.Counter)
+    _pc = collections.defaultdict(collections.Counter)
     for r in sheets['PO Customer']:
-        if r[0] and r[1]: _pv[r[0]][r[1]] += 1
+        if r[0] and r[2]: _pv[r[0]][r[2]] += 1
+        if r[0] and r[1]: _pc[r[0]][r[1]] += 1
     _fixed_conf = 0
     for po, ctr in _pv.items():
         if len(ctr) < 2: continue
         win = ctr.most_common(1)[0][0]
         for r in sheets['PO Customer']:
+            if r[0] == po and r[2] and r[2] != win:
+                r[2] = win; r[12] = (r[12] or '') + '|ISSUER-ALIGNED'; _fixed_conf += 1
+    for po, ctr in _pc.items():
+        if len(ctr) < 2: continue
+        win = ctr.most_common(1)[0][0]
+        for r in sheets['PO Customer']:
             if r[0] == po and r[1] and r[1] != win:
-                r[1] = win; r[11] = (r[11] or '') + '|VENDOR-ALIGNED'; _fixed_conf += 1
-    if _fixed_conf: print('PO vendor conflicts aligned:', _fixed_conf, flush=True)
+                r[1] = win; r[12] = (r[12] or '') + '|VCODE-ALIGNED'
+    if _fixed_conf: print('PO issuer conflicts aligned:', _fixed_conf, flush=True)
 
     # --- split glued PO item rows: whole OCR line got crammed into Product Code cell.
     # Find qty/price/total triple at the tail of the Product string; accept ONLY when
@@ -467,11 +495,11 @@ def main():
     UNIT_TOK = r'(?:LNN|LST|LSN|PCS|PC|BOX|CTN|CRT|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR)'
     split_c = 0
     for r in sheets['PO Customer']:
-        if len(r) < 12 or not (r[4] or '').strip():
+        if len(r) < 13 or not (r[5] or '').strip():
             continue
-        if any(str(r[i]).strip() for i in (5, 7, 9)):
+        if any(str(r[i]).strip() for i in (6, 8, 10)):
             continue  # already split — never overwrite parsed fields
-        toks = (r[4] or '').split()
+        toks = (r[5] or '').split()
         if len(toks) < 4:
             continue
         tail = toks[-9:]
@@ -507,12 +535,12 @@ def main():
         code = ''
         # code may have stayed in the name (remap missed it, e.g. two leading numbers)
         mcode = re.match(r'^(\d{6,14})\s+(.*)$', ' '.join(desc), re.S)
-        if mcode and not str(r[3]).strip():
+        if mcode and not str(r[4]).strip():
             code, desc = mcode.group(1), [mcode.group(2)]
-        r[3] = (str(r[3]).strip() or code)
-        r[4] = ' '.join(desc).strip()
-        r[5], r[6], r[7], r[9] = qty, uon, price, total
-        r[11] = (r[11] or 'OCR_ITEM') + '|SPLIT-GLUED'
+        r[4] = (str(r[4]).strip() or code)
+        r[5] = ' '.join(desc).strip()
+        r[6], r[7], r[8], r[10] = qty, uon, price, total
+        r[12] = (r[12] or 'OCR_ITEM') + '|SPLIT-GLUED'
         split_c += 1
     if split_c:
         print('PO glued-row split:', split_c, flush=True)
@@ -521,18 +549,18 @@ def main():
     UNITS = r'(?:CTN|CRT|CT|PCS|PC|BOX|LNN|LSN|LST|KRG|BLK|DZN|PAC|SACH|ROLL|GIN|LTR|BAL)'
     qty_norm = 0
     for r in sheets['PO Customer']:
-        if len(r) < 12:
+        if len(r) < 13:
             continue
-        q = str(r[5] or '').strip()
+        q = str(r[6] or '').strip()
         if not q:
             continue
         m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s+({UNITS})', q, re.I)
         if not m:
             m = re.fullmatch(rf'(\d+(?:[.,]\d+)?)\s*/\s*({UNITS})', q, re.I)
         if m:
-            r[5] = m.group(1)
-            if not str(r[6]).strip():
-                r[6] = m.group(2).upper()
+            r[6] = m.group(1)
+            if not str(r[7]).strip():
+                r[7] = m.group(2).upper()
             qty_norm += 1
     if qty_norm:
         print('PO qty/UON normalized:', qty_norm, flush=True)
@@ -549,13 +577,19 @@ def main():
         except Exception: return None
     po_fixed=0
     for r in sheets['PO Customer']:
-        pq,pu,pd_,pt=_n2(r[5]),_n2(r[7]),_n2(r[8]),_n2(r[9])
-        if None in (pq,pu,pt) or r[11]=='OCR_PAGE_REVIEW': continue
-        _keep='|'+'|'.join(x for x in str(r[11]).split('|') if x.startswith(('PO-','SPLIT-'))) if '|' in str(r[11]) else ''
-        if abs(pu*pq-(pd_ or 0)-pt)<=max(1.0,abs(pt)*0.001):
-            r[11]='MAPPED'+_keep
+        pq,pu,pd_,pt=_n2(r[6]),_n2(r[8]),_n2(r[9]),_n2(r[10])
+        if None in (pq,pu,pt) or r[12]=='OCR_PAGE_REVIEW': continue
+        _keep='|'+'|'.join(x for x in str(r[12]).split('|') if x.startswith(('PO-','SPLIT-'))) if '|' in str(r[12]) else ''
+        d = pd_ or 0
+        net = pu*pq - d
+        ok = abs(net - pt) <= max(1.0, abs(pt)*0.001)
+        if not ok:  # PPN-incl variant allowed by rules (JUMLAH prints gross)
+            _f = 1.11 if str(r[3]).strip() == '11%' else (1.011 if str(r[3]).strip() == '1.1%' else None)
+            if _f: ok = abs(net*_f - pt) <= max(1.0, abs(pt)*0.01)
+        if ok:
+            r[12]='MAPPED'+_keep
         else:
-            r[11]='REVIEW-ARITH'+_keep; po_fixed+=1
+            r[12]='REVIEW-ARITH'+_keep; po_fixed+=1
     fp_fixed=0
     for r in sheets['Faktur Penjualan']:
         if r[17]=='SUMMARY': continue
@@ -651,7 +685,7 @@ def main():
     # PO Customer: a row needs a PO number OR item data to mean anything
     before=len(sheets['PO Customer'])
     sheets['PO Customer']=[r for r in sheets['PO Customer']
-        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(3,10))]
+        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(4,11))]
     if len(sheets['PO Customer'])!=before:
         print('tidy PO Customer (no-PO-no-item) ->',len(sheets['PO Customer']), flush=True)
     # Faktur Penjualan: drop rows where all data cols empty (confidence/review status only)

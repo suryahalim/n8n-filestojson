@@ -1,0 +1,14 @@
+{
+ "AEON": {"pt": "PT AEON INDONESIA", "re": "AEON", "n": 78},
+ "HARI HARI": {"pt": "PT SINARSAHABAT INTIMAKMUR", "re": "HARI HARI|PASAR SWALAYAN", "n": 55},
+ "MITRA": {"pt": "PT. MITRA BELANJA ANDA", "re": "MITRA BELANJA", "n": 31},
+ "MIDI": {"pt": "PT. MIDI UTAMA INDONESIA TBK", "re": "MIDI UTAMA", "n": 1, "note": "user example p166 + LPB headers"},
+ "LION": {"pt": "PT. LION SUPER INDO", "re": "LION SUPER INDO|SUPER INDO", "n": 50},
+ "FOODHALL": {"pt": "PT. SWALAYAN SUKSES ABADI", "re": "FOODHALL", "n": 16},
+ "TIP TOP": {"pt": "PT. TIP TOP", "re": "TIP TOP", "n": 39},
+ "VICTORY": {"pt": "PT. VICTORY RETAILINDO", "re": "VICTORY RETAILINDO", "n": 7},
+ "GRAND LUCKY": {"pt": "PT. MITRA BELANJA ANDA", "re": "GRAND\\s*LUCKY", "n": 52, "note": "self-learned 2026-10-01: legal entity co-printed on 52/68 GrandLucky PO pages"},
+ "RANCH MARKET": {"pt": "PT SUPRA BOGA LESTARI TBK", "re": "RANCH MARKET", "n": 13},
+ "FARMERS MARKET": {"pt": "PT SUPRA BOGA LESTARI TBK", "re": "FARMERS? MARKET", "n": 27},
+ "HERO": {"pt": "PT. HERO RETAIL NUSANTARA", "re": "\\bHERO\\b(?!IN)", "n": 32, "note": "page-PT proven 32 rows; junk suffix 'SUDAH' stripped"}
+}

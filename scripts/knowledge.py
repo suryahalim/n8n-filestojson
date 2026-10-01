@@ -317,12 +317,12 @@ def record_po_variants(sheets):
     data = rows[1:] if (rows and rows[0] and 'Purchase' in str(rows[0][0])) else rows
     added = 0
     for r in data:
-        if len(r) < 12 or not str(r[0]).strip():
+        if len(r) < 13 or not str(r[0]).strip():
             continue
-        st = str(r[11])
+        st = str(r[12])
         if 'MAPPED' not in st and 'OCR_ITEM' not in st:
             continue
-        comp = po_company(r[1])
+        comp = po_company(r[2])
         shape = po_shape(r[0])
         e = reg.setdefault(comp, {}).setdefault(shape, {'count': 0, 'example': r[0]})
         e['count'] += 1

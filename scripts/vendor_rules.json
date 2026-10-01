@@ -1,7 +1,9 @@
 {
  "self_companies": [
+  "MAJU\\s+ABADI",
   "MAKMUR\\s+B\\w{0,6}SAMA|SAHANA\\s+ADIJ",
-  "SARANA\\s+ABADI\\s+MAKMUR"
+  "SARANA\\s+ABADI\\s+MAKMUR",
+  "\\bSARANA\\b"
  ],
  "junk": [
   "^PT\\.?\\s*Address",

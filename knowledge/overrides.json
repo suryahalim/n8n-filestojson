@@ -11442,5 +11442,305 @@
   "stage": "P1-VISUAL",
   "evidence": "vision re-read; page Σjumlah=698,912 == printed DPP=698,912",
   "at": "2026-09-30 20:23:09"
+ },
+ "FP|p266 7000362700 - 7000362799|1000525|LAFONTE SPAGHETTI 225GR": {
+  "fields": {
+   "qty": "7 / 0",
+   "harga": "6.875,00",
+   "jumlah": "1.888.500,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=24,155,766 == printed DPP=24,153,766",
+  "at": "2026-09-30 20:36:10"
+ },
+ "FP|p266 7000362700 - 7000362799|1000524|LAFONTE SPAGHETTI 450GR": {
+  "fields": {
+   "qty": "79 / 0",
+   "harga": "12.925,00",
+   "jumlah": "20.013.070,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=24,155,766 == printed DPP=24,153,766",
+  "at": "2026-09-30 20:36:10"
+ },
+ "FP|p266 7000362700 - 7000362799|1000527|LAFONTE SAUCE 117GR SPAG": {
+  "fields": {
+   "qty": "4 / 0",
+   "harga": "5.366,67",
+   "jumlah": "378.672,2"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=24,155,766 == printed DPP=24,153,766",
+  "at": "2026-09-30 20:36:10"
+ },
+ "FP|p266 7000362700 - 7000362799|1000523|LAFONTE SAUCE 315GR BEEF": {
+  "fields": {
+   "qty": "7 / 0",
+   "harga": "13.670,00",
+   "jumlah": "1.875.524,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=24,155,766 == printed DPP=24,153,766",
+  "at": "2026-09-30 20:36:10"
+ },
+ "FP|p87 7000363300 - 7000363399|1001422|OVALE FACIAL LOTION 200M": {
+  "fields": {
+   "qty": "0 / 18",
+   "harga": "25.045,66",
+   "jumlah": "432,77"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=2,103 == printed DPP=2,104",
+  "at": "2026-09-30 20:39:45"
+ },
+ "FP|p87 7000363300 - 7000363399|1001189|ELLIPS MOROCCAN 20-GR TR": {
+  "fields": {
+   "qty": "0 / 35",
+   "harga": "7.207,21",
+   "jumlah": "249,08"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=2,103 == printed DPP=2,104",
+  "at": "2026-09-30 20:39:45"
+ },
+ "FP|p87 7000363300 - 7000363399|1002778|ELLIPS HAIR SERUM UTL 48": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "32.432,44",
+   "jumlah": "1.120,65"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=2,103 == printed DPP=2,104",
+  "at": "2026-09-30 20:39:45"
+ },
+ "FP|p87 7000363300 - 7000363399|1003131|SLEEK BABY BN SLS FREE 4": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "26.128,17",
+   "jumlah": "300,97"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=2,103 == printed DPP=2,104",
+  "at": "2026-09-30 20:39:45"
+ },
+ "FP|p268 7000363300 - 7000363399|1000403|ITO EN OI OCHA 500ML 24X": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "9.240,00",
+   "jumlah": "221.760,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=1,062,000 == printed DPP=1,062,000",
+  "at": "2026-09-30 20:46:17"
+ },
+ "FP|p268 7000363300 - 7000363399|1000400|ITO EN OI OCHA 500ML 24X": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "7.800,00",
+   "jumlah": "187.200,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=1,062,000 == printed DPP=1,062,000",
+  "at": "2026-09-30 20:46:17"
+ },
+ "FP|p268 7000363300 - 7000363399|1000401|ITO EN OI OCHA 500ML 24X": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "8.510,00",
+   "jumlah": "204.240,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=1,062,000 == printed DPP=1,062,000",
+  "at": "2026-09-30 20:46:17"
+ },
+ "FP|p268 7000363300 - 7000363399|1001937|ITOEN OI OCHA 500ML 24X5": {
+  "fields": {
+   "qty": "2 / 0",
+   "harga": "9.350,00",
+   "jumlah": "448.800,0"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=1,062,000 == printed DPP=1,062,000",
+  "at": "2026-09-30 20:46:17"
+ },
+ "FP|p278 7000363300 - 7000363399|1002835|OREO 105GR VANILLA": {
+  "fields": {
+   "qty": "2 / 0",
+   "harga": "7.196,00",
+   "jumlah": "345.408,00"
+  },
+  "stage": "P2-AGREE",
+  "evidence": "2 independent reads agree; fits qty=carton*isi+pcs (isi=24)",
+  "at": "2026-09-30 20:47:52"
+ },
+ "FP|p123 7000363000 - 7000363099|1000073|VAPE ELEKTRIK CLD 45ML 4": {
+  "fields": {
+   "qty": "66 / 0",
+   "harga": "17.161,97",
+   "jumlah": "37.716.606,26"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=104,950,808 == printed DPP=104,950,808",
+  "at": "2026-09-30 20:49:16"
+ },
+ "FP|p123 7000363000 - 7000363099|1000065|VAPE ONE PUSH 30 HARI 10": {
+  "fields": {
+   "qty": "81 / 0",
+   "harga": "20.181,82",
+   "jumlah": "18.123.405,54"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=104,950,808 == printed DPP=104,950,808",
+  "at": "2026-09-30 20:49:16"
+ },
+ "FP|p123 7000363000 - 7000363099|1000075|VAPE ONE PUSH 30H 10ML S": {
+  "fields": {
+   "qty": "143 / 0",
+   "harga": "20.181,82",
+   "jumlah": "31.995.641,88"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=104,950,808 == printed DPP=104,950,808",
+  "at": "2026-09-30 20:49:16"
+ },
+ "FP|p123 7000363000 - 7000363099|1003106|VAPE AEROSOL 200ML SWEET": {
+  "fields": {
+   "qty": "112 / 0",
+   "harga": "13.783,78",
+   "jumlah": "17.115.154,22"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=104,950,808 == printed DPP=104,950,808",
+  "at": "2026-09-30 20:49:16"
+ },
+ "FP|p171 7000362400 - 7000362499|1000077|VAPE COIL 30GR TANPA ASA": {
+  "fields": {
+   "qty": "12 / 0",
+   "harga": "3.903,90",
+   "jumlah": "2.596.835,24"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1003106|VAPE AEROSOL 200ML SWEET": {
+  "fields": {
+   "qty": "40 / 0",
+   "harga": "13.783,76",
+   "jumlah": "6.112.555,08"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1000064|VAPE AEROSOL 600ML SWEET": {
+  "fields": {
+   "qty": "19 / 0",
+   "harga": "30.675,68",
+   "jumlah": "6.461.632,60"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1000078|VAPE ELEKTRIK REFILL 45H": {
+  "fields": {
+   "qty": "7 / 0",
+   "harga": "14.727,03",
+   "jumlah": "6.857.391,16"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1000073|VAPE ELEKTRIK CLD 45ML 4": {
+  "fields": {
+   "qty": "11 / 0",
+   "harga": "17.181,97",
+   "jumlah": "6.286.101,04"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1000065|VAPE ONE PUSH 30 HARI 10": {
+  "fields": {
+   "qty": "49 / 0",
+   "harga": "20.181,92",
+   "jumlah": "10.963.541,62"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p171 7000362400 - 7000362499|1000075|VAPE ONE PUSH 30H 10ML S": {
+  "fields": {
+   "qty": "7 / 0",
+   "harga": "20.181,82",
+   "jumlah": "1.566.220,24"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=40,844,277 == printed DPP=40,844,277",
+  "at": "2026-09-30 20:55:37"
+ },
+ "FP|p198 7000362400 - 7000362499|1003530|BOLA DELI TEPUNG KETAN P": {
+  "fields": {
+   "qty": "640 / 0",
+   "harga": "15.540,54",
+   "jumlah": "183.244.101,73"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=197,584,957 == printed DPP=197,584,957",
+  "at": "2026-09-30 20:56:15"
+ },
+ "FP|p198 7000362400 - 7000362499|1000139|BOLA DELI MAIZENA 250GR": {
+  "fields": {
+   "qty": "120 / 0",
+   "harga": "5.605,41",
+   "jumlah": "14.340.855,43"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=197,584,957 == printed DPP=197,584,957",
+  "at": "2026-09-30 20:56:15"
+ },
+ "FP|p180 7000363500 - 7000363599|1000069|VAPE AEROSOL 600ML ORANG": {
+  "fields": {
+   "qty": "1 / 0",
+   "harga": "30.675,68",
+   "jumlah": "366.746,00"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=10,468,410 == printed DPP=10,461,410",
+  "at": "2026-09-30 20:59:51"
+ },
+ "FP|p180 7000363500 - 7000363599|1000062|VAPE AEROSOL 600ML CANDY": {
+  "fields": {
+   "qty": "9 / 0",
+   "harga": "30.675,00",
+   "jumlah": "3.246.642,00"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=10,468,410 == printed DPP=10,461,410",
+  "at": "2026-09-30 20:59:51"
+ },
+ "FP|p180 7000363500 - 7000363599|1000063|VAPE AEROSOL 600ML FLORA": {
+  "fields": {
+   "qty": "8 / 0",
+   "harga": "30.675,00",
+   "jumlah": "2.885.904,00"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=10,468,410 == printed DPP=10,461,410",
+  "at": "2026-09-30 20:59:51"
+ },
+ "FP|p180 7000363500 - 7000363599|1000064|VAPE AEROSOL 600ML SWEET": {
+  "fields": {
+   "qty": "11 / 0",
+   "harga": "30.675,00",
+   "jumlah": "3.969.118,00"
+  },
+  "stage": "P1-VISUAL",
+  "evidence": "vision re-read; page Σjumlah=10,468,410 == printed DPP=10,461,410",
+  "at": "2026-09-30 20:59:51"
  }
 }

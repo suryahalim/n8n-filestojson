@@ -671,7 +671,7 @@ def sj_tiptop(p):
 # ---------------- write -------------------------------------------------------
 HEADERS = {
  'Faktur Penjualan': ['Kode Material','SOR','Kemasan','Nama Produk','Qty','Harga','Disc 1','Disc 2','Disc 3','Disc 4','Disc 5','Jumlah','Dasar Pengenaan Pajak','PPN','Total','Source Page','Confidence','Review Status'],
- 'PO Customer': ['Purchase Order No','Vendor Code & name (Nama Lengkap SAMB)','PPN','Product Code','Product Name','Qty','UON','Unit Price','Discount','Total','Source Page','Mapping Status'],
+ 'PO Customer': ['Purchase Order No','Vendor Code (SAMB @ client)','PO Issuer (Customer)','PPN','Product Code','Product Name','Qty','UON','Unit Price','Discount','Total','Source Page','Mapping Status'],
  'Tanda Terima': ['Posting Date','Document No','Purchase Order No','Vendor Number','Item Code','Material Description','Qty','UON','Source Page','Mapping Status'],
  'Faktur Pajak': ['SOR','Billing Number','Kode Seri','NPWP & NITKU pengusaha & Pembeli','Dasar Pengenaan Pajak','PPN','Tanggal Transaksi','Source Page','Mapping Status'],
  'Dokumen Pelunasan': ['Reference No','Vendor Code & Name','Year, Month','Invoice Receipt Date','Store Code','Due','Amount','Text','Payment Document Number','Payment Date','Total Payment Amount','Customer Name','Source Page','Mapping Status'],
