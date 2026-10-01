@@ -460,7 +460,14 @@ def build_page(t, page):
             out = []
         if out:
             return out
-    # fallback header-only for classified PO pages with no items readable
+    # fallback: header + generic arithmetic-gated item tokenizer (user rule 2026-10-01:
+    # rows must carry Product Name; header-only is the LAST resort, not the norm)
+    try:
+        out = po_fallback_items(t, page)
+    except Exception:
+        out = []
+    if out:
+        return out
     if 'PURCHASE ORDER' in t.upper():
         try:
             out = po_generic_header(t, page)
@@ -469,3 +476,33 @@ def build_page(t, page):
         if out:
             return out
     return out
+
+def po_fallback_items(t, page):
+    """Last parser chain stage: PO header (same extraction as generic) + itemize() of the
+    page text. Every accepted row passes qty*price ~= total, so no invented values."""
+    import item_fallback
+    items = item_fallback.itemize(t)
+    if not items:
+        return []
+    po = (g(t, r'PO#\s*:\s*([0-9][0-9A-Z./-]{3,})') or g(t, r'(?:No\.?\s*PO|NO PO|PO Number|Nomor P?\.?O|Purchase Order No\.?)\s*[:\s]\s*([0-9A-Z][0-9A-Z./_-]{4,})')
+          or g(t, r'NOMER ORDER\s+(PO\.?[0-9][0-9./A-Z-]{4,})') or g(t, r'NOMER ORDER\s+([0-9A-Z][0-9A-Z./_-]{4,})')
+          or g(t, r'P\.O No\s*[:\s]\s*([0-9A-Z][0-9A-Z./-]{4,})') or g(t, r'ORDER NO\s*\n\s*([A-Z0-9]{6,})'))
+    vc = vendor_code_of(t)
+    iss, itag = issuer_of(t, '')
+    if not iss:
+        m = re.search(r'^([A-Z][A-Z .&\'()\-]{6,55})$', t, re.M)   # ALLCAPS header line = store/legal name
+        if m and not SELF.search(m.group(1)) and not JUNK_ISSUER.search(m.group(1)):
+            iss, itag = m.group(1).strip(), '|ISSUER-STORENAME'
+    if not iss:
+        m = re.search(r'DIKIRIM UNTUK[^\n:]*:\s*\n\s*([A-Z][^\n]{2,40})|Kirim Ke\s*[:\s]\s*([^\n]{3,40})|SHIP TO\s*[:\s]\s*([^\n]{3,40})', t, re.I)
+        cand = next((x for x in (m.groups() if m else []) if x), '')
+        if cand and not SELF.search(cand):
+            iss, itag = cand.strip(), '|ISSUER-SHIP'
+    ppn = ppn_of(t)
+    rows = []
+    for code, name, qty, uon, price, disc, total, derived in items:
+        st = 'MAPPED|ITEM-FALLBACK' if not derived else 'MAPPED|ITEM-FALLBACK|PRICE-DERIVED'
+        if itag:
+            st += itag
+        rows.append([po or '', vc, iss, ppn, code, name, qty, uon, price, disc, total, page, st])
+    return rows

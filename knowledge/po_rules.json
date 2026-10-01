@@ -4,7 +4,8 @@
     "vendor_code": "Kolom Vendor Code = KODE SAMB di mata client (mis. label 'VENDOR : 300045730'). BUKAN nama. Hanya diisi dari label code numerik; tidak ada label = kosong.",
     "po_issuer": "Kolom PO Issuer = customer-nya SAMB (penerbit PO). Selalu diawali 'PT' (contoh: PT Midi Utama Indonesia Tbk). Sumber berjenjang: (1) label WP/penerbit eksplisit, (2) baris PT non-self di header halaman, (3) alias brand->PT yang sudah terbukti koevidensi di issuers.json, (4) nama store tercetak + tag |ISSUER-STORENAME (belum terbukti PT).",
     "total": "Total = Qty x Unit Price - Discount. Varian gross-Ppn diterima bila kolom JUMLAH memang PPN-incl: total == (qty*price-disc)*(1+ppn). Selain itu -> REVIEW-ARITH, tidak pernah dikarang.",
-    "self_never_issuer": "PT. SARANA ABADI MAKMUR BERSAMA dan varian OCR rusaknya (SAHANA ADIJ/MAJU/KIRANA ABADI MAKMUR, dst) tidak boleh jadi issuer maupun vendor — perusahaan sendiri."
+    "self_never_issuer": "PT. SARANA ABADI MAKMUR BERSAMA dan varian OCR rusaknya (SAHANA ADIJ/MAJU/KIRANA ABADI MAKMUR, dst) tidak boleh jadi issuer maupun vendor — perusahaan sendiri.",
+    "item_rows": "Setiap baris item PO WAJIB punya Product Name (user 2026-10-01). Baris review kosong tidak boleh ditulis apa adanya: bila chain parser vendor gagal, generic tokenizer arithmetic-gated (scripts/item_fallback.py) mengambil 'SKU Name Qty UON Harga [Disc] Total' dari teks halaman — qty*harga harus cocok total tercetak (tol 2%, gate) → status MAPPED|ITEM-FALLBACK. Hanya bila halaman benar-benar tak terbaca → PO-HEADER-NOITEMS."
   },
   "brand_aliases": {},
   "alias_note": "brand_aliases diisi otomatis oleh learner (co-occurrence brand x PT non-self pada halaman yang sama, >=5 kejadian, konsisten) — bukan dari tebakan."

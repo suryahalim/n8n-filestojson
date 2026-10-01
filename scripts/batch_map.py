@@ -682,10 +682,12 @@ def main():
         if k in sheets:
             before=len(sheets[k]); sheets[k]=_tidy(k, sheets[k])
             print('tidy',k,before,'->',len(sheets[k]), flush=True)
-    # PO Customer: a row needs a PO number OR item data to mean anything
+    # PO Customer (user rule 2026-10-01): every row MUST carry a Product Name.
+    # Nameless header/review stubs are dropped from this tab (raw page stays in Review tab).
+    JUNK_NAME = __import__('re').compile(r'^[-–—]?\s*(?:Jumlah|Kekurangan|Selisih|Sisa|Printed|Halaman|Total\b|Sub\s*Total)', __import__('re').I)
     before=len(sheets['PO Customer'])
     sheets['PO Customer']=[r for r in sheets['PO Customer']
-        if str(r[0]).strip() or any(str(r[i]).strip() for i in range(4,11))]
+        if len(r)>5 and str(r[5]).strip() and not JUNK_NAME.match(str(r[5]))]
     if len(sheets['PO Customer'])!=before:
         print('tidy PO Customer (no-PO-no-item) ->',len(sheets['PO Customer']), flush=True)
     # Faktur Penjualan: drop rows where all data cols empty (confidence/review status only)
