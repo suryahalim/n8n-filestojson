@@ -775,6 +775,36 @@ def col_name(n):
         s = chr(65+r) + s
     return s
 
+def format_po_tab(sid):
+    """Enforce clean formatting on PO Customer tab (13-col schema): explicit per-column formats,
+    bold frozen header, sane widths — so template leftovers from the 12-col era can't mis-style cells."""
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build as apibuild
+    d = json.load(open(os.path.expanduser('~/.hermes/google_token.json')))
+    svc = apibuild('sheets', 'v4', credentials=Credentials.from_authorized_user_info(d), cache_discovery=False)
+    meta = svc.spreadsheets().get(spreadsheetId=sid,
+        fields='sheets.properties.sheetId,sheets.properties.title').execute()
+    sh = next(s for s in meta['sheets'] if s['properties']['title'] == 'PO Customer')
+    shid = sh['properties']['sheetId']
+    TEXT = {0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F', 7: 'H', 11: 'L', 12: 'M'}
+    NUM = {6: 'G', 8: 'I', 9: 'J', 10: 'K'}
+    req = [{'updateSheetProperties': {'properties': {'sheetId': shid,
+                'gridProperties': {'frozenRowCount': 1}},
+                'fields': 'gridProperties.frozenRowCount'}},
+           {'repeatCell': {'range': {'sheetId': shid, 'startRowIndex': 0, 'endRowIndex': 1},
+            'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
+            'fields': 'userEnteredFormat.textFormat.bold'}}]
+    for ci in range(13):
+        fm = {'type': 'TEXT'} if ci in TEXT else {'type': 'NUMBER', 'pattern': '#,##0'}
+        req.append({'repeatCell': {'range': {'sheetId': shid, 'startRowIndex': 1,
+                'startColumnIndex': ci, 'endColumnIndex': ci + 1},
+                'cell': {'userEnteredFormat': {'numberFormat': fm}},
+                'fields': 'userEnteredFormat.numberFormat'}})
+    req.append({'autoResizeDimensions': {'dimensions': {'sheetId': shid, 'dimension': 'COLUMNS',
+                'startIndex': 0, 'endIndex': 13}}})
+    svc.spreadsheets().batchUpdate(spreadsheetId=sid, body={'requests': req}).execute()
+    return shid
+
 def write(sid, sheets, review):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build as apibuild

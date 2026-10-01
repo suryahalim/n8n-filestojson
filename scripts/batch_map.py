@@ -706,6 +706,12 @@ def main():
         # extend write to include custom headers: inject
         HEADERS['Faktur Pajak'] = FP_HEADERS
         print('written:', json.dumps(_ws(a.sid, dict(sheets), review), ensure_ascii=False))
+        try:
+            from map_sheets import format_po_tab
+            format_po_tab(a.sid)
+            print('PO Customer formatting applied', flush=True)
+        except Exception as e:
+            print('format pass failed:', repr(e), flush=True)
         # --- record PO-number label variants per company (self-learning registry) ---
         try:
             import knowledge as KBV
