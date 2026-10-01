@@ -1,6 +1,6 @@
 import json, subprocess, sys
 sid = open('/home/suryahalim/doc-pipeline/copy_sid.txt').read().strip()
-d = json.load(open('/tmp/dump_v2f.json'))
+d = json.load(open('/tmp/dump_v2g.json'))
 sheets = d['sheets']
 review = d.get('review')
 sys.path.insert(0, '/home/suryahalim/doc-pipeline/scripts')
