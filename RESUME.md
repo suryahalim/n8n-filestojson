@@ -35,6 +35,16 @@ Semua file yang disebut di sini sudah ter-commit dan ter-push ke `origin/main`.
 - **Belum di-map ke Google Sheet** — ini kerjaan berikutnya: jalankan batch_map window folder bundle ini (bukan window lama; dokumen punya `folder='Complete bundles - 24 customers'`), rules PO v2 + item_fallback, lalu tulis + read-back. Snapshot OCR lengkap: `snapshots/bundle_docs_ocr_2026-10-02.json` (95 docs, halaman per-doc) + inventory CSV.
 - n8n removed 2026-10-02 (ddbd1f0) — arsip di archive/n8n-2026-10-02/. Jangan pakai :5678.
 
+
+## 1d. TABEL TARGET DI DB (2026-10-02, db-init/08) — FOKUS MAPPING
+Empat tabel destination = 4 tab sheet, kolom 1:1, + view export persis header Google Sheet:
+- `faktur_pajak` (v_sheet_faktur_pajak): SOR, Billing Number, Kode Seri, NPWP Pengusaha/DPP/PPN/Tgl/NPWP Pembeli/Nama Pembeli/Nama BKP/Qty/Harga Satuan/Jumlah Harga/Potongan/Uang Muka/PPN Dev/PpnBM/Harga Jual Total/Source File
+- `faktur_penjualan` (v_sheet_faktur_penjualan): Kode Material, SOR, Kemasan, Nama Produk, Qty, Harga, Disc1-5, Jumlah, DPP, PPN, Total, Source Page, Confidence, Review Status
+- `po_customer` (v_sheet_po_customer): 13 kolom v2 — product_name NOT NULL
+- `tanda_terima` (v_sheet_tanda_terima): Posting Date, Document No, PO No, Vendor Number, Item Code, Material Description, Qty, UON, Source Page, Mapping Status
+Loader idempoten: `docker exec dp-extractor python3 /tmp/load_target_tables.py /data/_load_dump.json` (script: `scripts/load_target_tables.py`; natural_key=upsert; numeric IDR-style parsed; >1e12 dianggap junk->NULL no-guess).
+Sudah dimuat DUMP FINAL 2026-10-01: fp 5091, fps 6218, po 940, tt 842 baris; document_id link 100%/93%/87%/97%. Alur baru: batch_map --dump -> load_target_tables -> export view ke sheet (atau query langsung untuk RPA).
+
 ## 2. Rules PO (authoritative)
 Terdokumentasi di `knowledge/po_rules.json`; implementasi `scripts/po_v2.py` + `scripts/item_fallback.py`:
 1. **PPN** hanya `11%` atau `1.1%`.
