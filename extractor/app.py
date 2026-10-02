@@ -1359,7 +1359,7 @@ async def mapping_run(request: Request):
     if not dids:
         with db() as c, c.cursor() as cur:
             cur.execute("""SELECT t.document_id FROM map_tasks t JOIN documents d ON d.id=t.document_id
-                           WHERE t.status IN ('pending','failed') AND d.status IN ('VALIDATED','DELIVERED')
+                           WHERE t.status IN ('pending','failed','review') AND d.status IN ('VALIDATED','DELIVERED')
                            ORDER BY t.created_at LIMIT %s""", (int(body.get("batch", 1)),))
             dids = [r[0] for r in cur.fetchall()]
     if not dids:
@@ -1384,7 +1384,7 @@ async def mapping_run(request: Request):
                 await _post_note(did, "review", f"no target tab guess for {d['filename']}")
                 continue
             with db() as c3, c3.cursor() as cur3:
-                cur3.execute("UPDATE map_tasks SET status='claimed', engine='api', attempts=attempts+1, updated_at=now() WHERE document_id=%s AND status IN ('pending','failed')", (did,))
+                cur3.execute("UPDATE map_tasks SET status='claimed', engine='api', attempts=attempts+1, updated_at=now() WHERE document_id=%s AND status IN ('pending','failed','review')", (did,))
             prompt = map_prompt(tab, d["rel_path"], text)
             payload = json.dumps({"model": cfg["model"], "temperature": 0,
                                   "messages": [{"role": "user", "content": prompt}]}).encode()
@@ -1494,12 +1494,12 @@ async def settings_map_test(request: Request):
     did = body.get("document_id")
     if not did:
         with db() as c, c.cursor() as cur:
-            cur.execute("SELECT document_id FROM map_tasks WHERE status IN ('pending','failed') ORDER BY created LIMIT 1")
+            cur.execute("SELECT document_id FROM map_tasks WHERE status IN ('pending','failed','review') ORDER BY created_at LIMIT 1")
             r = cur.fetchone(); did = r[0] if r else None
     if not did:
         raise HTTPException(400, "no pending document to test on")
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("SELECT standard_json, rel_path, folder, tab_guess FROM map_tasks t LEFT JOIN documents d ON d.id=t.document_id WHERE t.document_id=%s", (did,))
+        cur.execute("SELECT d.standard_json, t.rel_path, t.folder, t.tab_guess FROM map_tasks t LEFT JOIN documents d ON d.id=t.document_id WHERE t.document_id=%s", (did,))
         row = cur.fetchone()
     std = (row or {}).get("standard_json") or {}
     text = "\n".join((p.get("text") or "") for p in sorted(std.get("pages", []) or [], key=lambda x: x.get("page", 0)))
