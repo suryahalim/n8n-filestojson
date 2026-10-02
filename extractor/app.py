@@ -20,6 +20,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Res
 import pika
 
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
+INBOX_DIR = Path(os.environ.get("INBOX_DIR", "/data/inbox"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 RABBIT_HOST = os.environ.get("RABBIT_HOST", "rabbitmq")
 RABBIT_USER = os.environ.get("RABBIT_USER", "pipeline")
@@ -166,9 +167,10 @@ def find_by_sha(sha):
 
 
 async def ingest_one(raw: bytes, filename: str, declared_mime: str,
-                     doc_type: str, notes: str) -> dict:
+                     doc_type: str, notes: str, folder: str = "", rel_path: str = "") -> dict:
     """Shared single-document pipeline: save original -> job -> extract -> validate
-    -> publish (or flag). Used by /documents (multipart) and /documents/batch."""
+    -> publish (or flag). Used by /documents (multipart), /documents/batch and folder DFS.
+    folder/rel_path = provenance from the DFS folder upload (empty for plain uploads)."""
     sha = hashlib.sha256(raw).hexdigest()
     doc_id = uuid.uuid4().hex
     mime = sniff_mime(raw, (declared_mime or "").split(";")[0], filename)
@@ -176,9 +178,9 @@ async def ingest_one(raw: bytes, filename: str, declared_mime: str,
     stored = UPLOAD_DIR / f"{sha[:16]}.{suffix}"
     stored.write_bytes(raw)
     with db() as c, c.cursor() as cur:
-        cur.execute("INSERT INTO documents(id,filename,sha256,mime,size,stored_path,status) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,'UPLOADED')",
-                    (doc_id, filename, sha, mime, len(raw), str(stored)))
+        cur.execute("INSERT INTO documents(id,filename,sha256,mime,size,stored_path,status,folder,rel_path) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,'UPLOADED',%s,%s)",
+                    (doc_id, filename, sha, mime, len(raw), str(stored), folder or None, rel_path or None))
         cur.execute("INSERT INTO jobs(document_id,kind,status) VALUES(%s,'extract','PENDING') RETURNING id",
                     (doc_id,))
         job_id = cur.fetchone()[0]
@@ -560,6 +562,225 @@ async def upload_batch(request: Request):
         return {"batch": True, "total": len(results), "summary": counts,
                 "auto_ocr_started": len(flagged), "auto_map_started": len(validated), "results": results}
     return {"batch": True, "total": len(results), "summary": counts, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Folder / DFS ingestion (2026-10-02): walk a directory tree, find PDFs
+# (and images/xlsx), ingest every file in parallel workers, auto-OCR each.
+# ---------------------------------------------------------------------------
+
+def _walk_find_docs(root: Path, exts=None):
+    """DFS (depth-first) over a directory tree; yield files whose extension is
+    a supported document type (pdf/jpg/jpeg/png/webp/xlsx/txt by default).
+    Hidden entries and symlink cycles are skipped."""
+    exts = exts or set(MIME_SUFFIX.values())
+    seen = set()
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = sorted(os.scandir(d), key=lambda e: e.name)
+        except OSError:
+            continue
+        dirs, files = [], []
+        for e in entries:
+            if e.name.startswith('.'):
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    rp = os.path.realpath(e.path)
+                    if rp in seen:
+                        continue
+                    seen.add(rp)
+                    dirs.append(Path(e.path))
+                elif e.is_file(follow_symlinks=True):
+                    files.append(e)
+            except OSError:
+                continue
+        for e in files:
+            f = Path(e.path)
+            if f.suffix.lower().lstrip('.') in exts:
+                yield f
+        stack.extend(reversed(dirs))   # DFS: descend subdirs depth-first
+
+
+async def _process_one_file(f: Path, folder_name: str, doc_type: str,
+                            skip_existing: bool, allow_dup: bool) -> dict:
+    try:
+        raw = f.read_bytes()
+    except OSError as e:
+        return {"rel_path": str(f), "status": "ERROR", "error": f"read failed: {e}"[:200]}
+    return await _process_bytes(raw, f.name, folder_name, doc_type, skip_existing, allow_dup,
+                                 rel=str(f.relative_to(Path(folder_name))) if folder_name else f.name)
+
+
+async def _process_bytes(raw: bytes, name: str, folder_name: str, doc_type: str,
+                         skip_existing: bool, allow_dup: bool, rel: str = "") -> dict:
+    if not raw:
+        return {"rel_path": rel or name, "status": "ERROR", "error": "empty file"}
+    sha = hashlib.sha256(raw).hexdigest()
+    if skip_existing:
+        dup = find_by_sha(sha)
+        if dup:
+            return {"rel_path": rel or name, "sha256": sha, "status": "SKIPPED_DUPLICATE",
+                    "document_id": dup["document_id"], "existing_status": dup["status"]}
+    try:
+        r = await ingest_one(raw, name, "", doc_type,
+                             f"folder upload: {folder_name}",
+                             folder=folder_name or "", rel_path=rel or "")
+    except HTTPException as e:
+        r = {"sha256": sha, "status": "EXTRACT_FAILED", "error": str(e.detail)[:200]}
+    r["rel_path"] = rel or name
+    return r
+
+
+def _folder_job_state():
+    st = getattr(_folder_job_state, "_st", None)
+    if st is None:
+        st = _folder_job_state._st = {"running": False, "folder": "", "total": 0, "processed": 0,
+                                      "counts": {}, "started": "", "finished": "", "error": "",
+                                      "last_files": [], "log": []}
+    return st
+
+
+def _folder_ingest_bg(files, folder_name: str, doc_type: str, skip_existing: bool,
+                      allow_dup: bool, source_label: str, spool: Path = None):
+    """Background: ingest every file with N workers, OCR each right after intake
+    (same worker — intake+OCR of one doc is sequential, docs run in parallel).
+    files: list of ("path", Path, rel) or ("bytes", name, raw, rel).
+    OCR_WORKERS env (live: 4) controls parallelism; OCR_AUTO=0 keeps intake only."""
+    st = _folder_job_state()
+    if st["running"]:
+        return False
+    st.update({"running": True, "folder": source_label, "total": len(files), "processed": 0,
+               "counts": {}, "started": datetime.datetime.utcnow().isoformat() + "Z",
+               "finished": "", "error": "", "last_files": [], "log": []})
+
+    nworkers = max(1, int(os.environ.get("OCR_WORKERS", "4")))
+    auto_ocr = os.environ.get("OCR_AUTO", "1") == "1"
+    results = []
+    rlock = threading.Lock()
+
+    def work(entry):
+        if entry[0] == "path":
+            _, fpath, rel = entry
+            name = Path(fpath).name
+            try:
+                raw = Path(fpath).read_bytes()
+            except OSError as e:
+                return {"rel_path": rel, "status": "ERROR", "error": f"read failed: {str(e)[:180]}"}
+        else:
+            _, name, raw, rel = entry
+        r = asyncio.run(_process_bytes(raw, name, folder_name, doc_type, skip_existing, allow_dup, rel=rel))
+        if auto_ocr and r.get("document_id") and r.get("status") == "FLAGGED":
+            try:
+                o = run_ocr(r["document_id"])
+                r["ocr"] = {"status": o.get("status"), "chars": o.get("chars")}
+            except Exception as e:
+                r["ocr"] = {"status": "OCR_FAILED", "error": str(e)[:180]}
+        elif auto_ocr and r.get("document_id") and r.get("status") == "VALIDATED":
+            r["ocr"] = {"status": "SKIPPED_DIGITAL"}
+        return r
+
+    def worker():
+        try:
+            with ThreadPoolExecutor(max_workers=nworkers) as pool:
+                for r in pool.map(work, files):
+                    with rlock:
+                        results.append(r)
+                        st["processed"] = len(results)
+                        c = {}
+                        for x in results:
+                            c[x["status"]] = c.get(x["status"], 0) + 1
+                        st["counts"] = c
+                        st["last_files"] = [x.get("rel_path", "")[:60] for x in results[-3:]]
+                        st["log"].append(f"{st['processed']}/{st['total']} {r.get('rel_path','')} -> {r['status']}")
+                        st["log"] = st["log"][-50:]
+        except Exception as e:
+            st["error"] = str(e)[:300]
+        finally:
+            st["running"] = False
+            st["finished"] = datetime.datetime.utcnow().isoformat() + "Z"
+            if spool:
+                try:
+                    shutil.rmtree(spool, ignore_errors=True)
+                except Exception:
+                    pass
+            print(f"FOLDER-INGEST DONE {source_label}: {st['counts']}", flush=True)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return True
+
+
+@app.post("/documents/folder")
+async def upload_folder(request: Request,
+                        files: list[UploadFile] = File(...),
+                        doc_type: str = Form(""),
+                        folder_name: str = Form(""),
+                        notes: str = Form("")):
+    """DFS folder upload (multipart): browser sends every file in the picked folder
+    (webkitdirectory) with its relative path in the filename field. Files spool to
+    disk (no RAM blowup on big trees), then ingest + auto-OCR run in background workers."""
+    doc_type, _ = _meta_from_query(request, doc_type, notes)
+    allow_dup = os.environ.get("INGEST_ALLOW_DUP", "0") == "1"
+    job = uuid.uuid4().hex[:12]
+    spool = Path(os.environ.get("SPOOL_DIR", "/data/spool")) / job
+    spool.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for f in files:
+        rp = (f.filename or "unnamed").replace("\\", "/").lstrip("/")
+        parts = [p for p in rp.split("/") if p not in ("", ".", "..")]
+        name = parts[-1] if parts else "unnamed"
+        rel = "/".join(parts)
+        dest = spool / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as out:
+            while True:
+                chunk = await f.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        entries.append(("path", dest, rel))
+    if not entries:
+        shutil.rmtree(spool, ignore_errors=True)
+        raise HTTPException(400, "no files")
+    started = _folder_ingest_bg(entries, folder_name or "", doc_type, True, allow_dup,
+                                f"upload:{folder_name or 'folder'} ({len(entries)} files)",
+                                spool=spool.parent)
+    if not started:
+        shutil.rmtree(spool, ignore_errors=True)
+        raise HTTPException(409, "a folder ingestion is already running — check GET /documents/folder/status")
+    return {"accepted": True, "total": len(entries), "status_url": "/documents/folder/status"}
+
+
+@app.post("/documents/folder/scan")
+async def scan_folder(body: dict):
+    """Server-side DFS: path is a directory mounted inside the extractor container
+    (e.g. /data/inbox from the compose volume). Walks it depth-first, finds PDFs +
+    images + xlsx, ingests + auto-OCR every document found, in background workers."""
+    p = Path((body or {}).get("path") or "")
+    if not str(p).startswith("/") or any(x == ".." for x in p.parts):
+        raise HTTPException(400, "absolute path inside the container required (no ..); mount folders under /data")
+    if not p.is_dir():
+        raise HTTPException(404, f"not a directory: {p}")
+    allow_dup = os.environ.get("INGEST_ALLOW_DUP", "0") == "1"
+    files = list(_walk_find_docs(p))
+    if not files:
+        return {"accepted": False, "total": 0, "note": "no supported documents found", "root": str(p)}
+    entries = [("path", f, str(f.relative_to(p))) for f in files]
+    started = _folder_ingest_bg(entries, str(p), body.get("doc_type") or "other",
+                                bool(body.get("skip_existing", True)), allow_dup,
+                                f"scan:{p}")
+    if not started:
+        raise HTTPException(409, "a folder ingestion is already running — check GET /documents/folder/status")
+    return {"accepted": True, "total": len(files), "root": str(p),
+            "files": [e[2] for e in entries][:200],
+            "status_url": "/documents/folder/status"}
+
+
+@app.get("/documents/folder/status")
+def folder_status():
+    return _folder_job_state()
 
 
 @app.post("/documents/{doc_id}/correct")
@@ -1608,7 +1829,7 @@ def get_raw(doc_id: str, b64: int = 0):
 @app.get("/documents")
 def list_documents(limit: int = 50):
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("SELECT id,filename,mime,size,status,review_loop,created,updated "
+        cur.execute("SELECT id,filename,mime,size,status,review_loop,created,updated,folder,rel_path "
                     "FROM documents WHERE status <> 'SPLIT_PARENT' ORDER BY created DESC LIMIT %s", (limit,))
         return {"documents": [dict(r) for r in cur.fetchall()]}
 
@@ -1749,11 +1970,94 @@ def view_list(limit: int = 50):
     rows = "".join(
         f"<tr><td><a href='/view/{H.escape(d['id'])}'>{d['id'][:10]}…</a></td>"
         f"<td>{H.escape(d['filename'])}</td><td>{_badge(d['status'])}</td>"
-        f"<td>{d['size']}</td><td>{d['created']}</td></tr>" for d in docs) or \
-        "<tr><td colspan='5'>no documents yet</td></tr>"
+        f"<td>{d['size']}</td><td>{d['created']}</td>"
+        f"<td>{H.escape(str(d.get('folder') or '')[:40])}</td></tr>" for d in docs) or \
+        "<tr><td colspan='6'>no documents yet</td></tr>"
     return _page("Doc Pipeline — Documents", f"""<h1>Doc Pipeline</h1>
-<div class='sub'>Ingested documents, newest first · <a href='/view/inbox'>receiving inbox</a> · <a href='/view/settings'>OCR settings</a> · <a href='/docs'>API console</a></div>
-<table><tr><th>ID</th><th>File</th><th>Status</th><th>Bytes</th><th>Created</th></tr>{rows}</table>""")
+<div class='sub'>Ingested documents, newest first · <a href='/view/upload'>upload folder</a> · <a href='/view/inbox'>receiving inbox</a> · <a href='/view/settings'>OCR settings</a> · <a href='/docs'>API console</a></div>
+<table><tr><th>ID</th><th>File</th><th>Status</th><th>Bytes</th><th>Created</th><th>Folder</th></tr>{rows}</table>""")
+
+
+UPLOAD_HTML = """<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Upload folder — Doc Pipeline</title>
+<style>body{font-family:system-ui,sans-serif;background:#f4f5f7;margin:0;padding:24px;color:#1a1a2e}
+.card{max-width:820px;margin:auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px #0001}
+label{display:block;font-weight:600;margin:14px 0 4px}input,select{width:100%;padding:9px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;font-size:14px}
+button{margin-top:16px;padding:10px 18px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-size:14px;cursor:pointer}
+button.sec{background:#e5e7eb;color:#111}button:disabled{opacity:.5;cursor:not-allowed}
+#out{margin-top:14px;padding:10px;border-radius:8px;font-size:13px;white-space:pre-wrap;display:none}
+.ok{background:#e7f7ec;color:#166534;display:block}.err{background:#fde8e8;color:#991b1b;display:block}
+.mut{background:#eef2ff;color:#3730a3;display:block}.hint{font-size:12px;color:#666;margin-top:3px}
+ul{font-size:12px;color:#444;max-height:180px;overflow:auto;background:#f8fafc;padding:8px 8px 8px 24px;border-radius:8px}
+.bar{height:10px;background:#e5e7eb;border-radius:6px;margin-top:8px;overflow:hidden}
+.bar>i{display:block;height:100%;background:#2563eb;width:0%;transition:width .4s}
+.nav{font-size:13px;margin-bottom:14px}</style></head><body>
+<div class='nav'><a href='/view'>← documents</a></div>
+<div class='card'><h2>Upload a folder — DFS finds every PDF</h2>
+<div class='hint'>Pick any folder (subfolders included — depth-first). PDF, JPG, PNG, WEBP, XLSX are ingested; duplicates by sha256 are skipped; OCR runs automatically per file (4 workers).</div>
+<label>Folder <span class='hint'>(whole tree)</span></label>
+<input type="file" id="dir" webkitdirectory directory multiple>
+<label>Or: individual files</label>
+<input type="file" id="files" multiple>
+<label>Doc type hint <span class='hint'>(optional; auto-classify when empty)</span></label>
+<input id="dtype" placeholder="other">
+<button id="go" onclick="send()">Upload & start batch OCR</button> <button class="sec" onclick="poll()" id="pb" disabled>Show live progress</button>
+<div id="pv" class="mut" style="display:none"></div>
+<div id="out"></div>
+<div class="bar" id="barw" style="display:none"><i id="bar"></i></div>
+<pre id="log" style="background:#0f172a;color:#d7e2f2;padding:10px;border-radius:8px;font-size:11px;max-height:220px;overflow:auto;display:none"></pre>
+</div><script>
+const $=id=>document.getElementById(id);
+let picked=[];
+function fmt(b){return b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB'}
+$('dir').onchange=e=>{picked=[...e.target.files];show()};
+$('files').onchange=e=>{picked=[...e.target.files];show()};
+function show(){
+  const t=picked.reduce((a,f)=>a+f.size,0);
+  $('pv').style.display='block';
+  $('pv').innerHTML=`<b>${picked.length} files</b> · ${fmt(t)} — DFS will upload all of them`+
+    `<ul>${picked.slice(0,50).map(f=>`<li>${f.webkitRelativePath||f.name} (${fmt(f.size)})</li>`).join('')}${picked.length>50?`<li>… ${picked.length-50} more</li>`:''}</ul>`;
+  $('go').disabled=!picked.length;
+}
+async function send(){
+  if(!picked.length)return say('err','pick a folder first');
+  $('go').disabled=true;say('mut','uploading '+picked.length+' files…');
+  const fd=new FormData();
+  for(const f of picked)fd.append('files',f,f.webkitRelativePath||f.name);
+  fd.append('folder_name',(picked[0].webkitRelativePath||'').split('/')[0]||'browser');
+  fd.append('doc_type',$('dtype').value||'other');
+  try{
+    const r=await fetch('/documents/folder',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||r.status);
+    say('ok','accepted: '+d.total+' files queued → DFS walk + OCR started in background');
+    $('pb').disabled=false;poll();
+  }catch(e){say('err',String(e.message||e));$('go').disabled=false;}
+}
+let tm=null;
+async function poll(){
+  clearInterval(tm);tm=setInterval(show1,3000);show1();
+}
+async function show1(){
+  try{
+    const s=await(await fetch('/documents/folder/status')).json();
+    $('barw').style.display='block';
+    $('bar').style.width=(s.total?Math.round(100*s.processed/s.total):0)+'%';
+    $('log').style.display='block';
+    $('log').textContent=(s.running?'RUNNING ':'')+s.folder+' — '+s.processed+'/'+s.total+
+      ' · '+JSON.stringify(s.counts)+'\\n'+(s.log||[]).join('\\n');
+    if(!s.running&&s.finished){clearInterval(tm);$('go').disabled=false;
+      say('ok','DONE '+s.folder+' · '+JSON.stringify(s.counts));}
+  }catch(e){}
+}
+function say(cls,msg){const o=$('out');o.className=cls;o.textContent=msg;o.style.display='block';}
+</script></body></html>"""
+
+
+@app.get("/view/upload", response_class=HTMLResponse)
+def view_upload():
+    return _page("Upload folder", UPLOAD_HTML)
 
 
 @app.get("/view/inbox", response_class=HTMLResponse)
