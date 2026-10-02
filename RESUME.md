@@ -29,6 +29,12 @@ Semua file yang disebut di sini sudah ter-commit dan ter-push ke `origin/main`.
 - **n8n DIHAPUS 2026-10-02** (commit berikutnya): container dp-n8n & port 5678 tidak ada lagi; intake/review/OCR 100% extractor-native (`/documents/{id}/ocr`, `/correct`, auto-chain). Definisi workflow lama: `archive/n8n-2026-10-02/`. Jangan pakai URL :5678 mana pun.
 - Provenance tersimpan di kolom `documents.folder` + `rel_path` (migrasi db-init/07 — sudah diterapkan live).
 
+
+## 1c. Latest state (2026-10-02 backup)
+- **"Complete bundles - 24 customers"** uploaded via /view/upload: 96 files → 95 docs (1 dup), 25 DELIVERED + 70 VALIDATED (all OCR'd). Provenance folder/rel_path per dokumen.
+- **Belum di-map ke Google Sheet** — ini kerjaan berikutnya: jalankan batch_map window folder bundle ini (bukan window lama; dokumen punya `folder='Complete bundles - 24 customers'`), rules PO v2 + item_fallback, lalu tulis + read-back. Snapshot OCR lengkap: `snapshots/bundle_docs_ocr_2026-10-02.json` (95 docs, halaman per-doc) + inventory CSV.
+- n8n removed 2026-10-02 (ddbd1f0) — arsip di archive/n8n-2026-10-02/. Jangan pakai :5678.
+
 ## 2. Rules PO (authoritative)
 Terdokumentasi di `knowledge/po_rules.json`; implementasi `scripts/po_v2.py` + `scripts/item_fallback.py`:
 1. **PPN** hanya `11%` atau `1.1%`.
