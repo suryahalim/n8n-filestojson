@@ -984,14 +984,15 @@ async def mapping_enqueue(request: Request):
 
 
 @app.get("/mapping/pending")
-def mapping_pending(limit: int = 50, folder: str = ""):
+def mapping_pending(limit: int = 50, folder: str = "", statuses: str = "pending,failed"):
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         q = """SELECT t.document_id, t.folder, t.rel_path, t.tab_guess, t.status, t.attempts, t.error,
                       d.filename, d.status AS doc_status
                FROM map_tasks t JOIN documents d ON d.id = t.document_id
-               WHERE t.status IN ('pending','failed')
+               WHERE t.status = ANY(%s)
                  AND d.status IN ('VALIDATED','DELIVERED')"""
-        args = []
+        slist = [s.strip() for s in (statuses or "pending,failed").split(",") if s.strip()]
+        args = [slist]
         if folder: q += " AND t.folder LIKE %s"; args.append(folder)
         q += " ORDER BY t.created_at LIMIT %s"; args.append(min(int(limit), 500))
         cur.execute(q, args)
@@ -1007,7 +1008,7 @@ async def mapping_claim(request: Request):
     with db() as c, c.cursor() as cur:
         cur.execute("""UPDATE map_tasks SET status='claimed', engine=%s, claimed_at=now(),
                               attempts=attempts+1, updated_at=now()
-                       WHERE document_id = ANY(%s) AND status IN ('pending','failed')
+                       WHERE document_id = ANY(%s) AND status IN ('pending','failed','review')
                        RETURNING document_id""", (engine, ids))
         got = [r[0] for r in cur.fetchall()]
     return {"claimed": got}
@@ -1047,7 +1048,7 @@ async def mapping_rows(doc_id: str, request: Request):
             rec.update(document_id=doc_id, folder=folder, rel_path=rel,
                        natural_key=f"{doc_id}|{tab}|{i}",
                        source_file=Path(str(drow["filename"] or "")).stem)
-            if tab in ("faktur_pajak", "faktur_penjualan") and rec.get("source_page") is None:
+            if rec.get("source_page") is None:
                 rec["source_page"] = 0
             if not str(rec.get("mapping_status") or "").strip():
                 rec["mapping_status"] = "MAPPED"
@@ -1386,16 +1387,29 @@ async def mapping_run(request: Request):
             with db() as c3, c3.cursor() as cur3:
                 cur3.execute("UPDATE map_tasks SET status='claimed', engine='api', attempts=attempts+1, updated_at=now() WHERE document_id=%s AND status IN ('pending','failed','review')", (did,))
             prompt = map_prompt(tab, d["rel_path"], text)
-            payload = json.dumps({"model": cfg["model"], "temperature": 0,
+            payload = json.dumps({"model": cfg["model"], "temperature": 0, "enable_thinking": False,
                                   "messages": [{"role": "user", "content": prompt}]}).encode()
             req = urllib.request.Request(normalize_chat_url(cfg["endpoint"]), data=payload,
                                          headers={"Content-Type": "application/json",
                                                   "Authorization": f"Bearer {cfg['key']}"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                out = json.loads(resp.read())
+
+            def _call():
+                with urllib.request.urlopen(req, timeout=420) as resp:
+                    return json.loads(resp.read())
+            out = await asyncio.to_thread(_call)
             content = out["choices"][0]["message"]["content"]
+            rows = []
             m = re.search(r"\{.*\}", content, re.S)
-            rows = json.loads(m.group(0))["rows"] if m else []
+            if m:
+                try:
+                    rows = json.loads(m.group(0)).get("rows", [])
+                except Exception:
+                    ma = re.search(r'"rows"\s*:\s*\[.*\]', content, re.S)
+                    if ma:
+                        try:
+                            rows = json.loads("{" + ma.group(0) + "}").get("rows", [])
+                        except Exception:
+                            rows = []
             if not rows:
                 await _post_note(did, "review", "engine returned no rows")
                 done.append({"document_id": did, "tab": tab, "written": 0, "note": "no rows"})
@@ -1436,7 +1450,7 @@ async def _write_rows(did, tab, rows):
         for i, rec in enumerate(recs):
             rec.update(document_id=did, folder=drow["folder"], rel_path=drow["rel_path"],
                        natural_key=f"{did}|{tab}|{i}", source_file=Path(str(drow["filename"] or "")).stem)
-            if tab in ("faktur_pajak", "faktur_penjualan") and rec.get("source_page") is None:
+            if rec.get("source_page") is None:
                 rec["source_page"] = 0
             if not str(rec.get("mapping_status") or "").strip():
                 rec["mapping_status"] = "MAPPED"
@@ -1508,14 +1522,16 @@ async def settings_map_test(request: Request):
         tab = "po_customer"
     prompt = map_prompt(tab, (row or {}).get("rel_path"), text)
     t0 = time.time()
-    payload = json.dumps({"model": cfg.get("model") or "qwen3.8-flash", "temperature": 0,
+    payload = json.dumps({"model": cfg.get("model") or "qwen3.8-flash", "temperature": 0, "enable_thinking": False,
                           "messages": [{"role": "user", "content": prompt}]}).encode()
     req = urllib.request.Request(normalize_chat_url(cfg["endpoint"]), data=payload,
                                  headers={"Content-Type": "application/json",
                                           "Authorization": f"Bearer {cfg['key']}"})
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            out = json.loads(resp.read())
+        def _call2():
+            with urllib.request.urlopen(req, timeout=420) as resp:
+                return json.loads(resp.read())
+        out = await asyncio.to_thread(_call2)
     except urllib.error.HTTPError as e:
         hint = {401: "key rejected (401)", 404: "model not available (404)", 429: "rate limited (429)"}.get(e.code, str(e.code))
         raise HTTPException(502, f"map endpoint said {hint}")
