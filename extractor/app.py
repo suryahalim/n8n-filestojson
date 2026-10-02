@@ -799,7 +799,7 @@ MAP_SHEET_HEADERS = {
         "Dasar Pengenaan Pajak", "PPN", "Tanggal Transaksi", "NPWP & NITKU Pembeli",
         "Nama Pembeli", "Nama Barang Kena Pajak", "Qty", "Harga Satuan", "Jumlah Harga",
         "Potongan Harga", "Uang Muka", "PPN Dev", "PPnBM", "Harga Jual Total", "Source File"],
-    "faktur_penjualan": ["Kode Material", "SOR", "Kemasan", "Nama Produk", "Qty", "Harga",
+    "faktur_penjualan": ["Kode Material", "SOR", "Nama PT", "Kemasan", "Nama Produk", "Qty", "Harga",
         "Disc 1", "Disc 2", "Disc 3", "Disc 4", "Disc 5", "Jumlah", "Dasar Pengenaan Pajak",
         "PPN", "Total", "Source Page", "Confidence", "Review Status"],
     "po_customer": ["Purchase Order No", "Vendor Code (SAMB @ client)", "PO Issuer (Customer)",
@@ -813,7 +813,7 @@ MAP_EXPORT_COLS = {
         "dasar_pengenaan_pajak", "ppn", "tanggal_transaksi", "npwp_pembeli", "nama_pembeli",
         "nama_bkp", "qty", "harga_satuan", "jumlah_harga", "potongan_harga", "uang_muka",
         "ppn_dev", "ppnbm", "harga_jual_total", "coalesce(rel_path, source_file)"],
-    "faktur_penjualan": ["kode_material", "sor", "kemasan", "nama_produk", "qty", "harga",
+    "faktur_penjualan": ["kode_material", "sor", "nama_pt", "kemasan", "nama_produk", "qty", "harga",
         "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah", "dasar_pengenaan_pajak",
         "ppn", "total", "source_page", "confidence", "coalesce(review_status, mapping_status)"],
     "po_customer": ["purchase_order_no", "vendor_code", "po_issuer", "ppn", "product_code",
@@ -832,7 +832,7 @@ MAP_COLS = {
                      "nama_pembeli", "nama_bkp", "qty", "harga_satuan", "jumlah_harga",
                      "potongan_harga", "uang_muka", "ppn_dev", "ppnbm", "harga_jual_total",
                      "source_file", "confidence", "review_status", "mapping_status"],
-    "faktur_penjualan": ["kode_material", "sor", "kemasan", "nama_produk", "qty", "harga",
+    "faktur_penjualan": ["kode_material", "sor", "nama_pt", "kemasan", "nama_produk", "qty", "harga",
                          "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah",
                          "dasar_pengenaan_pajak", "ppn", "total", "source_page",
                          "confidence", "review_status", "mapping_status"],
@@ -1063,6 +1063,11 @@ async def mapping_rows(doc_id: str, request: Request):
                 if not str(rec.get("po_issuer") or "").strip() and fb:
                     rec["po_issuer"] = fb
                     rec["mapping_status"] = "MAPPED-FOLDER-ISSUER"
+        if tab == "faktur_penjualan":
+            fb = _issuer_from_path(folder, rel)
+            for rec in recs:
+                if not str(rec.get("nama_pt") or "").strip() and fb:
+                    rec["nama_pt"] = fb
         cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (doc_id,))
         written = 0
         for i, rec in enumerate(recs):
@@ -1362,6 +1367,9 @@ def map_prompt(tab, rel_path, text):
         + ("PO rows MUST carry product_name; drop rows without a product name. "
            "po_issuer = the CUSTOMER company (PT), never SAMB/PT Sarana Abadi Makmur Bersama.\n"
            if tab == "po_customer" else "")
+        + ("nama_pt = the CUSTOMER company (PT) this sales invoice is issued to — read from letterhead/"
+           "customer header; leave null if the document does not print it.\n"
+           if tab == "faktur_penjualan" else "")
         + ("Ppn column format like '11%' or '1.1%'.\n" if tab == "po_customer" else "")
         + ("Dates dd/mm/yyyy or '16 September 2026' -> keep as written.\n" if tab in ("faktur_pajak", "tanda_terima") else "")
         + f"\nSource path hint: {rel_path}\n\nDOCUMENT TEXT:\n" + (text or "")[:24000] +
@@ -1472,6 +1480,11 @@ async def _write_rows(did, tab, rows):
                 if not str(rec.get("po_issuer") or "").strip() and fb:
                     rec["po_issuer"] = fb
                     rec["mapping_status"] = "MAPPED-FOLDER-ISSUER"
+        if tab == "faktur_penjualan":
+            fb = _issuer_from_path(drow["folder"], drow["rel_path"])
+            for rec in recs:
+                if not str(rec.get("nama_pt") or "").strip() and fb:
+                    rec["nama_pt"] = fb
         cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (did,))
         written = 0
         for i, rec in enumerate(recs):
