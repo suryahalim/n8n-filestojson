@@ -22,6 +22,12 @@ Semua file yang disebut di sini sudah ter-commit dan ter-push ke `origin/main`.
 - **Cache korpus OCR (semua halaman semua dokumen):** `snapshots/batch_map_docs_2026-10-01.json.gz` (13 MB terkompres; key = **document id**, bukan nama file)
 - **Checkpoint deep-verify:** `knowledge/dv_queue.json` (192 halaman selesai) + `snapshots/dv_queue_2026-10-01.json`; override terbukti di `knowledge/overrides.json`
 
+
+## 1b. Folder / DFS ingestion (baru 2026-10-02, commit e782fc6)
+- UI: `http://100.68.212.36:5000/view/upload` — pilih folder → DFS upload seluruh tree → ingest + auto-OCR paralel (OCR_WORKERS=4), progress live.
+- API: `POST /documents/folder` (multipart browser), `POST /documents/folder/scan {"path":"/data/inbox/..."}` (folder di disk NUC, mount `./data` → `/data` di container), `GET /documents/folder/status`.
+- Provenance tersimpan di kolom `documents.folder` + `rel_path` (migrasi db-init/07 — sudah diterapkan live).
+
 ## 2. Rules PO (authoritative)
 Terdokumentasi di `knowledge/po_rules.json`; implementasi `scripts/po_v2.py` + `scripts/item_fallback.py`:
 1. **PPN** hanya `11%` atau `1.1%`.
