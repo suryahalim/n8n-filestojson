@@ -855,6 +855,19 @@ MONTHS_FULL = {1: "januari", 2: "februari", 3: "maret", 4: "april", 5: "mei", 6:
                7: "juli", 8: "agustus", 9: "september", 10: "oktober", 11: "november", 12: "desember"}
 
 
+def _issuer_from_path(folder, rel_path=''):
+    # Provenance issuer: bundle folder names carry the customer PT, e.g.
+    # '23 1100002556 - PT TOTALINDO SEGAR JAYA - SOR2611...'. Some PO bodies
+    # (printed order forms) show only the supplier + SOR; issuer is not in the
+    # text -> fill from the folder the doc came from. Never invents.
+    import re as _re
+    for p in (folder, rel_path):
+        m = _re.search(r"(PT [A-Z][A-Za-z&.'\- ]{3,60}?)(?= - [A-Z0-9]{6,}|/|$)", str(p or ""))
+        if m:
+            return m.group(1).strip().title().replace("Pt ", "PT ")
+    return ""
+
+
 def _norm_cell(tab, col, v):
     """Coerce one incoming cell to its column type. Never invents: junk -> None."""
     if v is None or v == "":
@@ -1021,6 +1034,8 @@ async def mapping_rows(doc_id: str, request: Request):
     body = await request.json()
     tab = body.get("tab")
     rows = list(body.get("rows") or [])
+    if not rows:
+        raise HTTPException(422, "empty rows payload — refusing to delete existing rows")
     if tab not in MAP_COLS:
         raise HTTPException(400, f"unknown tab {tab!r} (valid: {sorted(MAP_COLS)})")
     if len(rows) > 2000:
@@ -1042,6 +1057,12 @@ async def mapping_rows(doc_id: str, request: Request):
             raise HTTPException(404, "document not found")
         folder = folder or drow["folder"]
         rel = rel or drow["rel_path"]
+        if tab == "po_customer":
+            fb = _issuer_from_path(folder, rel)
+            for rec in recs:
+                if not str(rec.get("po_issuer") or "").strip() and fb:
+                    rec["po_issuer"] = fb
+                    rec["mapping_status"] = "MAPPED-FOLDER-ISSUER"
         cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (doc_id,))
         written = 0
         for i, rec in enumerate(recs):
@@ -1445,6 +1466,12 @@ async def _write_rows(did, tab, rows):
     with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("SELECT folder, rel_path, filename FROM documents WHERE id=%s", (did,))
         drow = cur.fetchone()
+        if tab == "po_customer":
+            fb = _issuer_from_path(drow["folder"], drow["rel_path"])
+            for rec in recs:
+                if not str(rec.get("po_issuer") or "").strip() and fb:
+                    rec["po_issuer"] = fb
+                    rec["mapping_status"] = "MAPPED-FOLDER-ISSUER"
         cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (did,))
         written = 0
         for i, rec in enumerate(recs):
