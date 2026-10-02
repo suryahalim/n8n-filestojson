@@ -56,17 +56,17 @@ print("8. hot-reload: config file now rules (source=file, NO restart since step 
 s, c2 = req("GET", "/settings/ocr")
 print("  ", "source:", c2["source"], "model:", c2["model"])
 
-print("9. E2E through n8n with config from UI: upload photo + ocr (no engine in payload -> default qwen) ...")
+print("9. E2E extractor-native with config from UI: upload photo + OCR via /documents/{id}/ocr (no engine in payload -> default qwen) ...")
 raw = open('/home/suryahalim/doc-pipeline/tests/fixtures/SCAN-photo-DN-991.jpg', 'rb').read()
 body = json.dumps({"doc_type": "delivery_order", "notes": "settings-ui e2e",
     "files": [{"name": "p.jpg", "mime": "image/jpeg", "data_b64": __import__('base64').b64encode(raw).decode()}]}).encode()
 r = urllib.request.Request(B + "/documents/batch", data=body, method="POST", headers={"Content-Type": "application/json"})
 doc_id = json.load(urllib.request.urlopen(r, timeout=120))["results"][0]["document_id"]
 t0 = time.time()
-b2 = json.dumps({"document_id": doc_id}).encode()
-r2 = urllib.request.Request(HOST + ":5678/webhook/ocr-scan", data=b2, method="POST", headers={"Content-Type": "application/json"})
+b2 = json.dumps({}).encode()
+r2 = urllib.request.Request(B + f"/documents/{doc_id}/ocr", data=b2, method="POST", headers={"Content-Type": "application/json"})
 res = json.load(urllib.request.urlopen(r2, timeout=300))
-print("   %.1fs" % (time.time()-t0), "engine:", res.get("engine"), "chars:", res.get("chars"), "validated:", res.get("validated"))
+print("   %.1fs" % (time.time()-t0), "engine:", res.get("engine"), "chars:", res.get("chars") or res.get("completed_chars"), "validated:", res.get("validated"))
 s3, doc = req("GET", "/documents/" + doc_id)
 m = doc.get("standard_json", {})
 print("   ocr_model recorded:", m.get("ocr_model"), "| status:", doc.get("status"))

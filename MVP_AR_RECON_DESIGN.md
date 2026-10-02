@@ -93,7 +93,7 @@ No runtime DDL. Every change must be a numbered `db-init/*.sql` migration and be
 For 10,000 documents/day, the current background-thread OCR must evolve into queue-backed workers:
 
 ```text
-API/n8n -> ingest queue -> splitter workers -> OCR workers
+API -> ingest queue -> splitter workers -> OCR workers
        -> classifier workers -> mapper workers -> reconciliation workers
        -> review queue / downstream SAP adapter
 ```
@@ -121,4 +121,4 @@ The 10-document pilot passes when:
 - work orders do not become fabricated invoices;
 - ambiguous documents enter review with a reason;
 - all outputs can be exported without another LLM call;
-- no API key appears in n8n payloads, database output, Git, or backup JSON.
+- no API key appears in payloads, database output, Git, or backup JSON.

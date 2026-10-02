@@ -2,7 +2,8 @@
 extract -> standard JSON -> validation.
 Validation pass: publish to Service Bus (RabbitMQ exchange 'doc_pipeline',
 routing key 'job.deliver') + commit delivery task row (transaction with job DONE).
-Validation fail: flag fields + notify n8n review webhook (the loop back).
+Validation fail: flag fields + FLAGGED status (native review loop: auto-OCR chain
+or human fix at /view/<id> -> revalidate -> deliver; n8n removed 2026-10-02).
 Also hosts /mock/receiving as stand-in downstream system."""
 import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request, asyncio
 import time
@@ -25,7 +26,6 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 RABBIT_HOST = os.environ.get("RABBIT_HOST", "rabbitmq")
 RABBIT_USER = os.environ.get("RABBIT_USER", "pipeline")
 RABBIT_PASS = os.environ.get("RABBIT_PASS", "")
-N8N_REVIEW_WEBHOOK = os.environ.get("N8N_REVIEW_WEBHOOK", "http://n8n:5678/webhook/review-flagged")
 TARGET_API_URL = os.environ.get("TARGET_API_URL", "http://extractor:5000/mock/receiving")
 
 app = FastAPI(title="doc-pipeline extractor")
@@ -210,13 +210,6 @@ async def ingest_one(raw: bytes, filename: str, declared_mime: str,
                 publish("deliver", {"task_id": task_id, "document_id": doc_id})
                 return {"document_id": doc_id, "sha256": sha, "job_id": job_id,
                         "status": "VALIDATED", "delivery_task": task_id}
-            try:
-                req = urllib.request.Request(N8N_REVIEW_WEBHOOK,
-                                             data=json.dumps({"document_id": doc_id, "flags": flags}).encode(),
-                                             headers={"Content-Type": "application/json"}, method="POST")
-                urllib.request.urlopen(req, timeout=15)
-            except Exception:
-                pass
             return {"document_id": doc_id, "sha256": sha, "job_id": job_id,
                     "status": "FLAGGED", "flagged_fields": flags}
         except Exception as e:
@@ -445,7 +438,7 @@ def _auto_map_bg(doc_ids):
 
 def _auto_ocr_bg(doc_ids):
     """Option: auto-OCR (default engine) for flagged docs, sequential background thread.
-    Triggered right after /documents/batch when OCR_AUTO=1. n8n OCR workflow not required."""
+    Triggered right after /documents/batch when OCR_AUTO=1."""
     print("AUTO-OCR-QUEUED", ",".join(str(x)[:8] for x in doc_ids), flush=True)
     def one(did):
         r = run_ocr(did)
@@ -785,7 +778,7 @@ def folder_status():
 
 @app.post("/documents/{doc_id}/correct")
 async def correct_fields(doc_id: str, request: Request):
-    """Review loop entry: n8n/user posts corrected extracted fields; re-validate;
+    """Review loop entry: user/agent posts corrected extracted fields; re-validate;
     on pass, publish deliver (the 'No -> review -> back' arrow)."""
     body = await request.json()
     with db() as c, c.cursor() as cur:

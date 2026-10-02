@@ -12,11 +12,12 @@ Version: 2026-09-30 · Base cases executed live 2026-09-18 — **PASS** (U10 is 
 
 | Surface | URL | Purpose |
 |---|---|---|
-| Upload Form | http://100.68.212.36:5678/form/it-upload | intake, **multi-file batch**, no login |
+| Upload (folder DFS) | http://100.68.212.36:5000/view/upload | intake, **whole folder + subfolders**, no login |
+| Upload (API) | `POST :5000/documents/batch` / `/documents/folder[/scan]` | programmatic intake |
 | Result dashboard | http://100.68.212.36:5000/view | per-document status, parsed result, delivered payload |
 | Receiving inbox | http://100.68.212.36:5000/view/inbox | last 20 payloads the receiving API actually got |
 | API console (Swagger) | http://100.68.212.36:5000/docs | every endpoint, click "Try it out" |
-| n8n | http://100.68.212.36:5678 | Executions = audit of each form/webhook run |
+| Folder job progress | http://100.68.212.36:5000/documents/folder/status | live counts/log of the DFS ingestion job |
 | RabbitMQ | http://100.68.212.36:15672 (`pipeline` / `.env`) | watch queue `job.deliver` drain |
 
 ### FastAPI documentation and credentials
@@ -36,10 +37,8 @@ Credential checklist for a fresh test environment:
 
 | Credential/config | Needed for | Where it belongs | GitHub policy |
 |---|---|---|---|
-| `PIPELINE_DB_PASSWORD` | Postgres, n8n DB, extractor DB | local `.env` | placeholder only |
+| `PIPELINE_DB_PASSWORD` | Postgres, extractor DB | local `.env` | placeholder only |
 | `RABBITMQ_USER` / `RABBITMQ_PASS` | RabbitMQ UI and worker | local `.env` | placeholder only |
-| `N8N_OWNER_EMAIL` / `N8N_OWNER_PASS` | n8n editor login | local `.env` | placeholder only |
-| `N8N_ENCRYPTION_KEY` | n8n credential/database encryption | local `.env` | placeholder only |
 | `QWEN_API_KEY` | Qwen OCR/classification/mapping | extractor `.env` or `/view/settings` | never commit |
 | `SETTINGS_PIN` | optional protection for OCR Settings UI | local `.env` | placeholder only |
 
@@ -49,8 +48,7 @@ Never put real passwords, API keys, OAuth tokens, encryption keys, or connection
 
 Credential requirements by test:
 
-- U0/U1/U2/U3/U4/U7/U8/U13 through the form/API: no credential in the request; network access to the host is required.
-- n8n editor/execution inspection: `N8N_OWNER_EMAIL` + `N8N_OWNER_PASS`.
+- U0/U1/U2/U3/U4/U7/U8/U13 through the upload UI/API: no credential in the request; network access to the host is required.
 - RabbitMQ inspection: `RABBITMQ_USER` + `RABBITMQ_PASS`.
 - Qwen OCR tests: `QWEN_API_KEY`, unless using local Tesseract only.
 - Direct PostgreSQL verification: `PIPELINE_DB_PASSWORD` and local Docker access.
@@ -90,7 +88,7 @@ Take U3's Document ID. Swagger → `POST /documents/{id}/correct` → body:
 ```json
 {"extracted": {"kind": "image", "ocr": "DELIVERY NOTE DN-991, PowerStore 300T SN PST300T-77412 received at DC Cileungsi", "bytes": 46081}}
 ```
-Execute → `{"validated": true, "delivery_task": "..."}`. Reload `/view/<id>` → **DELIVERED**, OCR section shows the text. (n8n-automated variant: same JSON + `"document_id"` POSTed flat to `http://100.68.212.36:5678/webhook/review-complete` → `{"routed":true,"validated":true}` — PASS ✅.)
+Execute → `{"validated": true, "delivery_task": "..."}`. Reload `/view/<id>` → **DELIVERED**, OCR section shows the text. (Historical: the same correction used to be POSTed flat to n8n's `/webhook/review-complete`; n8n removed 2026-10-02 — use `POST /documents/{id}/correct`.)
 
 ### U5 · Retry — downstream failure self-heals — PASS ✅
 Swagger → `POST /mock/receiving/fail-next` → Execute. Then Form-upload any valid PDF.
@@ -108,7 +106,7 @@ Upload `PO-2026-8412.pdf`, note its ID. Upload the identical file again.
 Expect second submission: `SKIPPED_DUPLICATE` + **the existing** document ID — nothing stored/delivered twice.
 
 ### U9 · Audit trail — PASS ✅
-n8n → **Executions**: every form submission (single and batch) = one row with green status; open it → Prepare Batch node shows file names; extractor response shows per-file results. RabbitMQ console → `job.deliver`: publish spike per validated file, drains to Ready=0 instantly (1 consumer).
+`GET /documents/{id}/track` — per-document event trail (ingest → extract → OCR → deliver). RabbitMQ console → `job.deliver`: publish spike per validated file, drains to Ready=0 instantly (1 consumer). Folder jobs: `GET /documents/folder/status` log lines + `documents.folder/rel_path` provenance in DB.
 
 ### U10 · Staff simulation — acceptance run (10 min, phone only)
 U1 → U2 → U3 → U4 → U7 in one sitting, only Form + /view + Swagger. Green = the system is usable by IT staff with no terminal.
@@ -182,16 +180,16 @@ Validated docs → published to RabbitMQ `job.deliver` → worker POSTs this to 
 
 Flagged scans/photos can heal themselves without Swagger:
 `POST /documents/{id}/ocr?lang=eng|ind` — OCRs the stored original (pdftoppm 200dpi → tesseract per page, max 30 pages), merges text into standard JSON, re-validates, and delivers on pass.
-Via n8n: `POST http://<host>:5678/webhook/ocr-scan` body `{"document_id":"<id>","lang":"eng","engine":"tesseract|qwen"}` (workflow `docpipeline-ocr-01`; result includes `pages_ocr`, `chars`, `view` link).
-**Engine `qwen`** (temporary model `qwen3.8-flash` via Token Plan vision; swap = env `QWEN_MODEL` on dp-extractor) — key lives in extractor env `QWEN_API_KEY` (from `.env`, gitignored), NOT in n8n nodes. Photos/handwriting: Tesseract fails → use qwen.
+Trigger manually: `POST /documents/{id}/ocr?lang=eng|ind&engine=tesseract|qwen` (result includes pages, chars, view link) — same call the auto-chain makes.
+**Engine `qwen`** (temporary model `qwen3.8-flash` via Token Plan vision; swap = env `QWEN_MODEL` on dp-extractor) — key lives in extractor env `QWEN_API_KEY` (from `.env`, gitignored). Photos/handwriting: Tesseract fails → use qwen.
 
 ### U11 · Real MFP scan → OCR → DELIVERED — PASS ✅ (2026-09-18)
-19-page Lexmark MX722ade scan (vendor PT SARANA ABADI MAKMUR BERSAMA, SO→FAKTUR→receiving slip → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → n8n webhook → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
+19-page Lexmark MX722ade scan (vendor PT SARANA ABADI MAKMUR BERSAMA, SO→FAKTUR→receiving slip → FOODMAX BOGOR). Upload → FLAGGED (0-char text layer) → OCR trigger → **47 s: 19 pages, 28,943 chars, VALIDATED → DELIVERED**, `ocr_engine:tesseract` recorded in payload. Product/brand/customer tokens all present; note known Tesseract digit noise (`0↔6`, `SO-26110209135` → `SOR261 10209135`) — strict-number use cases are why Qwen-VL fallback (Option 2) comes next.
 
 ### U12 · Same 19-pager through Qwen (engine=qwen) — PASS ✅ (2026-09-18)
-`{"document_id":"…","engine":"qwen"}` → n8n webhook → 19 pages, 29,835 chars, VALIDATED→DELIVERED in **425 s** (~22 s/page, sequential). Quality vs Tesseract: phone/fax digits clean (`(021) 4601849, 4600093`), dates exact (`22-Jul-2026`, `28-Jul-2026`), SO/CPO numbers (`2100115362`), salesman `AHMAD TAHJUDIN`, warehouse/zone codes. Company header partially garbled on the decorative logo area (`PT . . . ANA ABADI` — stamp/logo region), and doc has no literal `SO-` prefix (it's `Sales Order [SO] #`), so token assertions must match real content, not guesses. Re-OCR replaces previous engine text (bug fixed `7992d61`).
+`{"document_id":"…","engine":"qwen"}` → OCR trigger (then n8n webhook, since removed) → 19 pages, 29,835 chars, VALIDATED→DELIVERED in **425 s** (~22 s/page, sequential). Quality vs Tesseract: phone/fax digits clean (`(021) 4601849, 4600093`), dates exact (`22-Jul-2026`, `28-Jul-2026`), SO/CPO numbers (`2100115362`), salesman `AHMAD TAHJUDIN`, warehouse/zone codes. Company header partially garbled on the decorative logo area (`PT . . . ANA ABADI` — stamp/logo region), and doc has no literal `SO-` prefix (it's `Sales Order [SO] #`), so token assertions must match real content, not guesses. Re-OCR replaces previous engine text (bug fixed `7992d61`).
 
-**Auto-OCR:** batch uploads auto-trigger OCR for every `FLAGGED` file when `OCR_AUTO=1`; this is enforced by the extractor and does not depend on an n8n payload field. Disable globally only with `OCR_AUTO=0`. `OCR_MAX_PAGES=0` means all pages are processed; set a positive value only when an operational cap is required.
+**Auto-OCR:** batch uploads auto-trigger OCR for every `FLAGGED` file when `OCR_AUTO=1`; this is enforced entirely by the extractor. Disable globally only with `OCR_AUTO=0`. `OCR_MAX_PAGES=0` means all pages are processed; set a positive value only when an operational cap is required.
 ## 6. Dedupe toggle (for testing)
 
 Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re-ingest but can be blocked by UI flows). To test with the SAME file repeatedly: set `INGEST_ALLOW_DUP=1` in `.env`, then `docker compose up -d extractor` — bypasses ALL dedupe (form/batch/single). Verified: same PDF 3× via batch + 1× via single = 4 separate documents. Return to `0` for production.
@@ -209,7 +207,7 @@ Dedupe sha256 is ON by default (batch → `SKIPPED_DUPLICATE`; single uploads re
 
 ## 8. FAQ while testing
 
-- Form won't open → Tailscale off. · Workflow edit ignored → must **Publish** (n8n top-right) — production runs the published version. · Payload empty in webhook → send FLAT JSON, never wrap in `{"body":...}`. · Task stuck QUEUED → worker down (`docker logs dp-worker`); sweeper self-heals within ~20 s if the bus message was missed. · n8n login loop → `N8N_SECURE_COOKIE=false` already set (USAGE §3.5).
+- Upload page `/view/upload` won't open → Tailscale off. · Manual OCR trigger → `POST /documents/{id}/ocr`, not the old webhook. · Task stuck QUEUED → worker down (`docker logs dp-worker`); sweeper self-heals within ~20 s if the bus message was missed. · Folder upload rejected 409 → another folder job is running (`GET /documents/folder/status`).
 
 Operations (start/stop/backup/env) live in **USAGE.md**.
 

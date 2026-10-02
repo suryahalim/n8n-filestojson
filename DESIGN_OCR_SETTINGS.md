@@ -13,7 +13,7 @@ OCR model/endpoint/key were env-only (`QWEN_MODEL` etc.) → changing them requi
 - Precedence: `ocr_config.json` (UI-managed) > env (`QWEN_API_KEY`, `QWEN_MODEL`, `QWEN_URL`, `OCR_ENGINE`) > code defaults. On first boot with no file, env seeds the page; saving from the UI takes ownership.
 - Env vars remain the disaster-recovery path (delete file → env works again).
 
-## API surface (extractor; n8n untouched — its workflows call the same endpoints)
+## API surface (extractor — the single service, all triggers go through it)
 
 | Route | Purpose |
 |---|---|
@@ -52,4 +52,4 @@ Test sends a tiny solid-black PNG asking the model to reply `ok` — exercises v
 
 ## Compatibility
 
-`engine:"qwen"` payload values and n8n branch labels stay valid (means "API vision engine", now provider-agnostic). Delivered JSON keeps `ocr_engine:"qwen"` + adds `ocr_model:<active>` so audits show which model produced each document.
+`engine:"qwen"` payload value stays valid (means "API vision engine", provider-agnostic). Delivered JSON keeps `ocr_engine:"qwen"` + adds `ocr_model:<active>` so audits show which model produced each document.

@@ -1,47 +1,8 @@
 name: doc-pipeline
 
 services:
-  n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
-    container_name: dp-n8n
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:5678:5678"
-      - "100.68.212.36:5678:5678"
-    environment:
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=100.68.212.36
-      - WEBHOOK_URL=http://100.68.212.36:5678/
-      - GENERIC_TIMEZONE=Asia/Jakarta
-      - TZ=Asia/Jakarta
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=db
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=pipeline
-      - DB_POSTGRESDB_PASSWORD=${PIPELINE_DB_PASSWORD}
-      - N8N_DEFAULT_USER_EMAIL=${N8N_OWNER_EMAIL}
-      - N8N_DEFAULT_USER_PASSWORD=${N8N_OWNER_PASS}
-      - N8N_RUNNERS_ENABLED=true
-      - N8N_SECURE_COOKIE=false
-      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-      - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=336
-      # large batch uploads: raise request payload cap (MB) and keep binary files on disk, not RAM
-      - N8N_PAYLOAD_SIZE_MAX=4000
-      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
-      # per-file cap for form/webhook multipart uploads (MB)
-      - N8N_FORMDATA_FILE_SIZE_MAX=100
-      # total file-size cap per multipart submission (MB); read by patched webhook-form-data.js
-      - N8N_FORMDATA_TOTAL_SIZE_MAX=1024
-    volumes:
-      - dp-n8n:/home/node/.n8n
-      # upstream formidable defaults maxTotalFileSize=maxFileSize; patch lets n8n honor the batch cap
-      - ./n8n/patches/webhook-form-data.js:/usr/local/lib/node_modules/n8n/dist/webhooks/webhook-form-data.js:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    networks: [dp]
-
+  # n8n removed 2026-10-02: intake is now extractor-native (/view/upload folder DFS,
+  # /documents/folder[/scan], auto-OCR chain). Workflows archived in archive/n8n-2026-10-02/.
   db:
     image: postgres:16-alpine
     container_name: dp-db
@@ -108,7 +69,6 @@ services:
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
-      - N8N_REVIEW_WEBHOOK=http://n8n:5678/webhook/review-flagged
     volumes:
       - ./data:/data
     depends_on:
@@ -138,7 +98,6 @@ services:
 volumes:
   dp-pgdata:
   dp-rabbit:
-  dp-n8n:
 
 networks:
   dp:

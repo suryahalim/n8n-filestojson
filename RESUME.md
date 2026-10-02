@@ -26,6 +26,7 @@ Semua file yang disebut di sini sudah ter-commit dan ter-push ke `origin/main`.
 ## 1b. Folder / DFS ingestion (baru 2026-10-02, commit e782fc6)
 - UI: `http://100.68.212.36:5000/view/upload` — pilih folder → DFS upload seluruh tree → ingest + auto-OCR paralel (OCR_WORKERS=4), progress live.
 - API: `POST /documents/folder` (multipart browser), `POST /documents/folder/scan {"path":"/data/inbox/..."}` (folder di disk NUC, mount `./data` → `/data` di container), `GET /documents/folder/status`.
+- **n8n DIHAPUS 2026-10-02** (commit berikutnya): container dp-n8n & port 5678 tidak ada lagi; intake/review/OCR 100% extractor-native (`/documents/{id}/ocr`, `/correct`, auto-chain). Definisi workflow lama: `archive/n8n-2026-10-02/`. Jangan pakai URL :5678 mana pun.
 - Provenance tersimpan di kolom `documents.folder` + `rel_path` (migrasi db-init/07 — sudah diterapkan live).
 
 ## 2. Rules PO (authoritative)

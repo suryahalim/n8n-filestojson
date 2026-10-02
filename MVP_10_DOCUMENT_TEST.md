@@ -46,7 +46,7 @@ Use real business samples where permitted. Redact personal data only in a copy; 
 
 ## Mixed-PDF / child-document test
 
-Upload one PDF through the n8n form with at least two clearly separated document types, for example:
+Upload one PDF through the intake UI (`/view/upload`) with at least two clearly separated document types, for example:
 
 - pages 1–2: Purchase Order;
 - page 3: Delivery Order or Surat Jalan.

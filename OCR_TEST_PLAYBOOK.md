@@ -1,23 +1,21 @@
 # Doc-Pipeline OCR — Test Playbook (2026-09-19)
 
-Focus: auto-OCR (Tesseract + Qwen via n8n) + dedupe OFF for testing.
-Current state: `INGEST_ALLOW_DUP=1` → **same file can be uploaded repeatedly, every copy becomes a new document.** OCR model live = `qwen3.8-flash` (Token Plan). Qwen key sits only inside dp-extractor (`QWEN_API_KEY`) — n8n never touches it.
+Focus: auto-OCR (Tesseract + Qwen, extractor-native) + dedupe OFF for testing.
+Current state: `INGEST_ALLOW_DUP=1` → **same file can be uploaded repeatedly, every copy becomes a new document.** OCR model live = `qwen3.8-flash` (Token Plan). Qwen key sits only inside dp-extractor (`QWEN_API_KEY`).
 
 ## 0. Entry points (phone browser OK — Tailscale must be on)
 
 | What | URL |
 | --- | --- |
-| Upload form (multi-file) | http://100.68.212.36:5678/form/it-upload |
+| Upload folder UI (multi-file + DFS) | http://100.68.212.36:5000/view/upload |
 | Viewer (all docs + status) | http://100.68.212.36:5000/view |
 | Receiving inbox (delivered JSON) | http://100.68.212.36:5000/view/inbox |
-| n8n UI / workflows | http://100.68.212.36:5678 |
 | Swagger API | http://100.68.212.36:5000/docs |
 | **OCR settings (key/model/endpoint)** | http://100.68.212.36:5000/view/settings |
 
-OCR trigger — since v1.4 it is **automatic**: any FLAGGED doc from a form/batch upload gets OCR'd right after intake (default engine, sequential queue). Manual trigger only needed for re-runs/engine overrides — from n8n (Execute workflow) or curl:
+OCR trigger — since v1.4 it is **automatic**: any FLAGGED doc from a form/batch upload gets OCR'd right after intake (default engine, sequential queue). Manual trigger only needed for re-runs/engine overrides — curl:
 ```
-POST http://100.68.212.36:5678/webhook/ocr-scan
-{"document_id":"<id>","engine":"qwen"}
+POST http://100.68.212.36:5000/documents/<id>/ocr?engine=qwen
 ```
 (`"engine":"tesseract"` → Tesseract; omit → **Qwen (default since 2026-09-20)**. `"lang":"eng|ind"` only applies to Tesseract.)
 
@@ -32,11 +30,10 @@ Fixtures (in `~/doc-pipeline/tests/fixtures/`, already sent to this chat):
 3. `/view` → row turns green **DELIVERED** within ~5 s. `/view/inbox` → payload contains `PO-2026-8412`, `1,347,873,000`.
 ✅ Expect: no OCR needed, straight to DELIVERED.
 
-## 2. T2 — Flatbed scan → auto-OCR Tesseract via n8n (2 min)
+## 2. T2 — Flatbed scan → OCR Tesseract (2 min)
 1. Form → upload `SCAN-delivery-note-DN-991.pdf`. Expect **FLAGGED** (red) — correct: 0-char text layer.
 2. Open the doc in `/view`, copy its ID from the URL (`/view/<id>`).
-3. n8n → workflow **"DocPipeline - OCR Scan (Tesseract | Qwen)"** → *Execute workflow* → in the first node (On OCR Request) set body:
-   `{"document_id":"<id>","engine":"tesseract"}` → run.
+3. Trigger: `curl -X POST "http://100.68.212.36:5000/documents/<id>/ocr?engine=tesseract"`.
 4. Response JSON: `engine:"tesseract", pages_ocr:1, chars:~264, validated:true`.
 5. `/view` → now **DELIVERED**; inbox payload has `extracted.ocr_engine:"tesseract"`.
 ✅ Known noise: Tesseract confuses 0↔6 in digits (e.g. `SO-…135` → `SOR261…`). That's why T3 exists.
@@ -69,7 +66,7 @@ For a FLAGGED doc: Swagger → `POST /documents/{id}/correct` with
 ```json
 {"extracted":{"kind":"image","ocr":"<any typed text>","bytes":123}}
 ```
-✅ Expect: doc revalidates → DELIVERED. This is the human path; auto-OCR (T2/T3) is just this same flow automated by n8n.
+✅ Expect: doc revalidates → DELIVERED. This is the human path; auto-OCR (T2/T3) is just this same flow automated in the extractor.
 
 ## 8. T8 — Regression via terminal (optional, on the server)
 ```bash
@@ -81,9 +78,9 @@ While `INGEST_ALLOW_DUP=1`, the duplicate assertions inside test_batch_e2e (S7) 
 ---
 
 
-## 9. Mapping invoice → tabel standar + RPA (n8n context, v1.5)
+## 9. Mapping invoice → tabel standar + RPA (v1.5)
 
-Konteks alur: semua tes ini dimulai dari **form n8n** (`http://100.68.212.36:5678/form/it-upload`) yang sama seperti T1–T8 — n8n hanya menerima file + `doc_type`, sisanya otomatis di extractor. Bedanya kali ini: dokumen **invoice** tidak berhenti di DELIVERED, tapi lanjut masuk tabel standar `invoice_rows`.
+Konteks alur: semua tes ini dimulai dari **upload UI/API** (`/view/upload` atau `/documents/batch`) yang sama seperti T1–T8 — extractor menerima file + `doc_type`, sisanya otomatis. Bedanya kali ini: dokumen **invoice** tidak berhenti di DELIVERED, tapi lanjut masuk tabel standar `invoice_rows`.
 
 ### M1 — Happy path invoice foto (3–4 mnt) ⭐ inti fitur
 1. Reload form (tab lama = submit senyap gagal), pilih **Document type = Invoice**, upload foto invoice vendor (contoh: DO WhatsApp kemarin).
@@ -94,7 +91,7 @@ Konteks alur: semua tes ini dimulai dari **form n8n** (`http://100.68.212.36:567
 ### M2 — Invoice multi-halaman (faktur 33 hal punya kamu) (5–12 mnt)
 Upload PDF scan >3 halaman sebagai Invoice → hasil mapping pakai strategi digest (hal 1-2 + terakhir penuh, tengah diringkas). Pass: selesai <200 dtk utk mapping, `notes` menjelaskan取舍 (mis. total=0,00 dari halaman 1 karena booklet multi-SO). Ini tes JUJUR-MODEL: dokumen campur-aduk harus menghasilkan confidence low/medium + notes, bukan angka karangan.
 
-### M3 — Siklus RPA penuh (2 mnt, terminal/HTTP, tanpa n8n)
+### M3 — Siklus RPA penuh (2 mnt, terminal/HTTP)
 ```bash
 B=http://100.68.212.36:5000
 curl -s $B/invoices?status=extracted | python3 -m json.tool | head -20    # pull antrean RPA
@@ -119,16 +116,16 @@ Upload foto/kwitansi dengan Document type = **Other** → DELIVERED tanpa blok M
 ## 10. Where to watch while testing
 - `/view` — status per document (green DELIVERED / red FLAGGED / amber).
 - `/view/inbox` — exact JSON received by the downstream API (schema `document_id, filename, sha256, extracted{…}`).
-- n8n → Executions — every OCR call is a visible run (timing, errors).
+- `docker logs dp-extractor | grep AUTO-OCR` — every OCR page run is visible (timing, errors).
 - Errors? `docker logs dp-extractor --since 10m | tail -20` (on the server).
 
 ## 11. Tuning knobs (env on dp-extractor, set in ~/doc-pipeline/.env + `docker compose up -d extractor`)
 | Var | Current | Meaning |
 | --- | --- | --- |
 | `QWEN_MODEL` | qwen3.8-flash | swap to `qwen-vl-ocr` etc. — no code change |
-| `QWEN_API_KEY` | set | Token Plan key (never in n8n/repo) |
+| `QWEN_API_KEY` | set | Token Plan key (extractor only, never committed) |
 | `OCR_ENGINE` | **qwen (default)** | fallback engine when caller omits `engine` — change to `tesseract` anytime |
-| `OCR_AUTO` | **1 (on)** | 1 = flagged docs auto-OCR immediately after form/batch upload; 0 = manual n8n trigger only |
+| `OCR_AUTO` | **1 (on)** | 1 = flagged docs auto-OCR immediately after upload (incl. folder jobs); 0 = manual trigger only |
 | `INGEST_ALLOW_DUP` | **1 (testing)** | 0 = dedupe sha256 ON for production |
 | `OCR_MAX_PAGES` | 0 | `0` = all pages; positive value = optional cap |
 
