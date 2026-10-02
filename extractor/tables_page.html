@@ -1,0 +1,53 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Mapped Tables</title>
+<style>
+ body{font-family:system-ui,sans-serif;background:#0f1216;color:#e6e9ed;margin:18px}
+ a{color:#6cb2ff}
+ .tabs{display:flex;gap:8px;margin:10px 0}
+ .tabs button{background:#1b2129;color:#cfd6dd;border:1px solid #2a313b;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.9rem}
+ .tabs button.on{background:#243043;color:#fff;border-color:#3d5a80}
+ .bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
+ .bar input{background:#12161c;border:1px solid #2a313b;color:#e6e9ed;padding:7px 10px;border-radius:7px;width:340px}
+ .bar button{background:#20415f;border:1px solid #3d5a80;color:#fff;border-radius:7px;padding:7px 12px;cursor:pointer}
+ #wrap{overflow:auto;max-height:78vh;border:1px solid #2a313b;border-radius:10px}
+ table{border-collapse:collapse;width:100%;font-size:12px}
+ th{position:sticky;top:0;background:#1b2129;color:#9fb6d4;padding:7px 8px;text-align:left;white-space:nowrap;border-bottom:1px solid #2a313b}
+ td{padding:5px 8px;border-bottom:1px solid #171c23;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+ tr:hover td{background:#151b23}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ .rev{color:#f2b263}.map{color:#7ee2a8}.cnt{color:#8a929b;font-size:.85rem}
+ #pg{margin:8px 0;color:#8a929b;font-size:.85rem}
+ .pgbtn{background:#1b2129;border:1px solid #2a313b;color:#cfd6dd;border-radius:6px;padding:4px 10px;cursor:pointer}
+</style></head><body>
+<h2 style="margin:4px 0">Hasil Mapping — Tabel Tujuan <span class="cnt" id="cnt"></span></h2>
+<div class="cnt">sumber: DB service (dp-db) &middot; <a href="/view/mapping">monitor</a> &middot; <a href="/view">documents</a></div>
+<div class="tabs" id="tabs"></div>
+<div class="bar"><input id="flt" placeholder="folder filter (LIKE, mis. Complete bundles)">
+<button onclick="go(0)">Terapkan</button>
+<button onclick="dl()">Download CSV (header sheet-exact)</button>
+<button class="pgbtn" onclick="go(Math.max(0,off-SIZE))">&larr; prev</button>
+<button class="pgbtn" onclick="go(off+SIZE)">next &rarr;</button>
+<span id="pg"></span></div>
+<div id="wrap"><table><tbody id="tb"></tbody></table></div>
+<script>
+/*JS_CONST*/
+const TABS=Object.keys(MAP_HEAD);let cur='po_customer',off=0,SIZE=200;
+const tabsEl=document.getElementById('tabs');
+function renderTabs(){tabsEl.innerHTML='';for(const t of TABS){const b=document.createElement('button');
+ b.textContent=MAP_LABEL[t];if(t===cur)b.className='on';b.onclick=()=>{cur=t;go(0)};tabsEl.appendChild(b)}}
+function fmt(v){if(v===null||v===undefined)return '';if(typeof v==='number')return v.toLocaleString('id-ID');
+ if(typeof v==='object')return JSON.stringify(v);return String(v)}
+async function go(o){off=o||0;renderTabs();
+ const f=encodeURIComponent(document.getElementById('flt').value||'');
+ const r=await (await fetch('/mapping/rows?tab='+cur+'&folder='+f+'&limit='+SIZE+'&offset='+off)).json();
+ document.getElementById('cnt').textContent='= '+r.total.toLocaleString('id-ID')+' baris';
+ const H=MAP_HEAD[cur],C=MAP_COLS[cur];let h='<tr>';for(const x of H)h+='<th>'+x+'</th>';h+='</tr>';
+ for(const row of r.rows){h+='<tr>';for(const c of C){const v=row[c];
+  let cls=(typeof v==='number')?' class="num"':((c==='mapping_status'||c==='review_status')?(String(v||'').indexOf('REVIEW')===0?' class="rev"':' class="map"'):'');
+  h+='<td'+cls+' title="'+String(fmt(v)).replace(/"/g,'&quot;')+'">'+fmt(v)+'</td>'}h+='</tr>'}
+ document.getElementById('tb').innerHTML=h;
+ document.getElementById('pg').textContent='baris '+(off+1)+'\\u2013'+Math.min(off+SIZE,r.total)+' dari '+r.total;
+}
+function dl(){const f=document.getElementById('flt').value;
+ location='/mapping/export.csv?tab='+cur+(f?('&folder='+encodeURIComponent(f)):'')}
+go(0);
+</script></body></html>

@@ -793,6 +793,39 @@ def folder_status():
 # Server enforces the hard rules on every rows POST (gate_rows); engine cannot sneak values.
 KNOWLEDGE_DIR = Path(os.environ.get("KNOWLEDGE_DIR", "/knowledge"))
 
+# sheet-exact headers + the DB columns behind each (order = sheet column order)
+MAP_SHEET_HEADERS = {
+    "faktur_pajak": ["SOR", "Billing Number", "Kode Seri", "NPWP & NITKU Pengusaha",
+        "Dasar Pengenaan Pajak", "PPN", "Tanggal Transaksi", "NPWP & NITKU Pembeli",
+        "Nama Pembeli", "Nama Barang Kena Pajak", "Qty", "Harga Satuan", "Jumlah Harga",
+        "Potongan Harga", "Uang Muka", "PPN Dev", "PPnBM", "Harga Jual Total", "Source File"],
+    "faktur_penjualan": ["Kode Material", "SOR", "Kemasan", "Nama Produk", "Qty", "Harga",
+        "Disc 1", "Disc 2", "Disc 3", "Disc 4", "Disc 5", "Jumlah", "Dasar Pengenaan Pajak",
+        "PPN", "Total", "Source Page", "Confidence", "Review Status"],
+    "po_customer": ["Purchase Order No", "Vendor Code (SAMB @ client)", "PO Issuer (Customer)",
+        "PPN", "Product Code", "Product Name", "Qty", "UON", "Unit Price", "Discount",
+        "Total", "Source Page", "Mapping Status"],
+    "tanda_terima": ["Posting Date", "Document No", "Purchase Order No", "Vendor Number",
+        "Item Code", "Material Description", "Qty", "UON", "Source Page", "Mapping Status"],
+}
+MAP_EXPORT_COLS = {
+    "faktur_pajak": ["sor", "billing_number", "kode_seri", "npwp_pengusaha",
+        "dasar_pengenaan_pajak", "ppn", "tanggal_transaksi", "npwp_pembeli", "nama_pembeli",
+        "nama_bkp", "qty", "harga_satuan", "jumlah_harga", "potongan_harga", "uang_muka",
+        "ppn_dev", "ppnbm", "harga_jual_total", "coalesce(rel_path, source_file)"],
+    "faktur_penjualan": ["kode_material", "sor", "kemasan", "nama_produk", "qty", "harga",
+        "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah", "dasar_pengenaan_pajak",
+        "ppn", "total", "source_page", "confidence", "coalesce(review_status, mapping_status)"],
+    "po_customer": ["purchase_order_no", "vendor_code", "po_issuer", "ppn", "product_code",
+        "product_name", "qty", "uon", "unit_price", "discount", "total", "source_page",
+        "mapping_status"],
+    "tanda_terima": ["posting_date", "document_no", "purchase_order_no", "vendor_number",
+        "item_code", "material_description", "qty", "uon", "source_page", "mapping_status"],
+}
+MAP_LABEL = {"faktur_pajak": "Faktur Pajak", "faktur_penjualan": "Faktur Penjualan",
+             "po_customer": "PO Customer", "tanda_terima": "Tanda Terima"}
+
+
 MAP_COLS = {
     "faktur_pajak": ["sor", "billing_number", "kode_seri", "npwp_pengusaha",
                      "dasar_pengenaan_pajak", "ppn", "tanggal_transaksi", "npwp_pembeli",
@@ -1147,7 +1180,7 @@ async function tick(){try{
 
 
 @app.get("/mapping/rows")
-def mapping_rows_list(document_id: str = "", tab: str = "", folder: str = "", limit: int = 200):
+def mapping_rows_list(document_id: str = "", tab: str = "", folder: str = "", limit: int = 200, offset: int = 0):
     """Drill-down: actual mapped rows. ?document_id=.. | ?tab=po_customer&folder=.. (newest first)."""
     tab = tab if tab in MAP_COLS else ""
     lim = max(1, min(int(limit), 1000))
@@ -1162,15 +1195,61 @@ def mapping_rows_list(document_id: str = "", tab: str = "", folder: str = "", li
         if tab:
             q = f"SELECT * FROM {tab} WHERE 1=1"; args = []
             if folder: q += " AND folder LIKE %s"; args.append(folder)
-            q += " ORDER BY updated_at DESC LIMIT %s"; args.append(lim)
-            cur.execute(q, args)
-            return {"tab": tab, "rows": [dict(r) for r in cur.fetchall()]}
+            cq = q.replace("SELECT *", "SELECT count(*)")
+            cur.execute(cq, args)
+            r0 = cur.fetchone()
+            total = r0["count"] if isinstance(r0, dict) else r0[0]
+            q += " ORDER BY natural_key LIMIT %s OFFSET %s"
+            cur.execute(q, args + [lim, max(0, int(offset))])
+            return {"tab": tab, "total": total, "offset": offset,
+                    "rows": [dict(r) for r in cur.fetchall()]}
         cur.execute("""SELECT t.document_id, t.tab_guess, t.status, t.error, t.rows_summary,
                               d.folder, d.rel_path, d.filename
                        FROM map_tasks t JOIN documents d ON d.id=t.document_id
                        WHERE t.status IN ('review','failed')
                        ORDER BY t.updated_at DESC LIMIT %s""", (lim,))
         return {"attention": [dict(r) for r in cur.fetchall()]}
+
+
+import csv as _csv
+
+PAGE_PATH = Path(__file__).resolve().parent / "tables_page.html"
+
+
+def _tables_html():
+    js_const = ("const MAP_HEAD=" + json.dumps(MAP_SHEET_HEADERS, ensure_ascii=False) +
+                ";const MAP_COLS=" + json.dumps(MAP_COLS, ensure_ascii=False) +
+                ";const MAP_LABEL=" + json.dumps(MAP_LABEL, ensure_ascii=False) + ";")
+    html = PAGE_PATH.read_text() if PAGE_PATH.exists() else "<pre>tables_page.html missing</pre>"
+    return html.replace("/*JS_CONST*/", js_const)
+
+
+@app.get("/mapping/export.csv")
+def mapping_export_csv(tab: str = "", folder: str = ""):
+    """Full-table CSV, headers exactly like the Google Sheet tab."""
+    if tab not in MAP_COLS:
+        raise HTTPException(400, f"tab must be one of {list(MAP_COLS)}")
+    with db() as c, c.cursor() as cur:
+        q = f"SELECT {', '.join(MAP_EXPORT_COLS[tab])} FROM {tab}"
+        args = []
+        if folder:
+            q += " WHERE folder LIKE %s"; args.append(folder)
+        q += " ORDER BY natural_key"
+        cur.execute(q, args)
+        data = cur.fetchall()
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(MAP_SHEET_HEADERS[tab])
+    for row in data:
+        w.writerow(["" if v is None else v for v in row])
+    fn = tab + ("_" + folder[:24].strip().replace(" ", "_") if folder else "") + ".csv"
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+@app.get("/view/tables", response_class=HTMLResponse)
+def view_tables():
+    return _tables_html()
 
 
 @app.get("/view/mapping", response_class=HTMLResponse)
