@@ -5,7 +5,7 @@ routing key 'job.deliver') + commit delivery task row (transaction with job DONE
 Validation fail: flag fields + FLAGGED status (native review loop: auto-OCR chain
 or human fix at /view/<id> -> revalidate -> deliver; n8n removed 2026-10-02).
 Also hosts /mock/receiving as stand-in downstream system."""
-import os, io, json, base64, glob, hashlib, uuid, datetime, urllib.request, asyncio
+import os, io, json, re, base64, glob, hashlib, uuid, datetime, urllib.request, urllib.parse, asyncio
 import time
 import threading
 import subprocess, tempfile, shutil
@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import psycopg2, psycopg2.extras
 from pydantic import BaseModel
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Response
 import pika
 
@@ -248,7 +248,10 @@ async def upload(request: Request,
         if result.get("status") == "FLAGGED":
             _auto_ocr_bg([result["document_id"]])
             result["auto_ocr_started"] = 1
-        elif result.get("status") == "VALIDATED" and os.environ.get("MAP_AUTO", "0") == "1":
+        elif result.get("status") == "VALIDATED":
+            _map_enqueue([result["document_id"]])
+            result["mapping_queued"] = 1
+        if result.get("status") == "VALIDATED" and os.environ.get("MAP_AUTO", "0") == "1":
             _auto_map_bg([result["document_id"]])
             result["auto_map_started"] = 1
     return result
@@ -443,6 +446,8 @@ def _auto_ocr_bg(doc_ids):
     def one(did):
         r = run_ocr(did)
         print("AUTO-OCR", did[:8], "->", r.get("status"), r.get("chars"), "chars", flush=True)
+        if r.get("status") == "VALIDATED":
+            _map_enqueue([did])
 
     def worker():
         for did in doc_ids:
@@ -550,6 +555,8 @@ async def upload_batch(request: Request):
         validated = [r["document_id"] for r in results if r.get("status") == "VALIDATED"]
         if flagged:
             _auto_ocr_bg(flagged)
+        if validated:
+            _map_enqueue(validated)
         if validated and os.environ.get("MAP_AUTO", "0") == "1":
             _auto_map_bg(validated)
         return {"batch": True, "total": len(results), "summary": counts,
@@ -673,6 +680,9 @@ def _folder_ingest_bg(files, folder_name: str, doc_type: str, skip_existing: boo
                 r["ocr"] = {"status": "OCR_FAILED", "error": str(e)[:180]}
         elif auto_ocr and r.get("document_id") and r.get("status") == "VALIDATED":
             r["ocr"] = {"status": "SKIPPED_DIGITAL"}
+        if r.get("document_id") and (r.get("status") == "VALIDATED"
+                                     or (r.get("ocr") or {}).get("status") == "VALIDATED"):
+            _map_enqueue([r["document_id"]])
         return r
 
     def worker():
@@ -774,6 +784,681 @@ async def scan_folder(body: dict):
 @app.get("/documents/folder/status")
 def folder_status():
     return _folder_job_state()
+
+
+# ---------------- mapping queue & monitor (flow: upload -> OCR -> map -> monitor) ----
+# DB is the queue of record (map_tasks, db-init/09). The mapping ENGINE is a client:
+#   'hermes' = deterministic parsers in scripts/ driving the HTTP API
+#   'api'    = LLM token-plan call fed with the SAME rules digest (knowledge/)
+# Server enforces the hard rules on every rows POST (gate_rows); engine cannot sneak values.
+KNOWLEDGE_DIR = Path(os.environ.get("KNOWLEDGE_DIR", "/knowledge"))
+
+MAP_COLS = {
+    "faktur_pajak": ["sor", "billing_number", "kode_seri", "npwp_pengusaha",
+                     "dasar_pengenaan_pajak", "ppn", "tanggal_transaksi", "npwp_pembeli",
+                     "nama_pembeli", "nama_bkp", "qty", "harga_satuan", "jumlah_harga",
+                     "potongan_harga", "uang_muka", "ppn_dev", "ppnbm", "harga_jual_total",
+                     "source_file", "confidence", "review_status", "mapping_status"],
+    "faktur_penjualan": ["kode_material", "sor", "kemasan", "nama_produk", "qty", "harga",
+                         "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah",
+                         "dasar_pengenaan_pajak", "ppn", "total", "source_page",
+                         "confidence", "review_status", "mapping_status"],
+    "po_customer": ["purchase_order_no", "vendor_code", "po_issuer", "ppn", "product_code",
+                    "product_name", "qty", "uon", "unit_price", "discount", "total",
+                    "source_page", "mapping_status"],
+    "tanda_terima": ["posting_date", "document_no", "purchase_order_no", "vendor_number",
+                     "item_code", "material_description", "qty", "uon", "source_page",
+                     "mapping_status"],
+}
+MAP_NUM = {t: {c for c in cols if c in (
+    "dasar_pengenaan_pajak", "ppn", "qty", "harga_satuan", "jumlah_harga", "potongan_harga",
+    "uang_muka", "ppn_dev", "ppnbm", "harga_jual_total", "harga", "disc_1", "disc_2",
+    "disc_3", "disc_4", "disc_5", "jumlah", "total", "unit_price", "discount")}
+    for t, cols in MAP_COLS.items()}
+MAP_DATE = {"faktur_pajak": {"tanggal_transaksi"}, "tanda_terima": {"posting_date"}}
+MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MEI": 5, "MAY": 5, "JUN": 6, "JUL": 7,
+          "AGU": 8, "AUG": 8, "SEP": 9, "OCT": 10, "OKT": 10, "NOV": 11, "DES": 12, "DEC": 12}
+MONTHS_FULL = {1: "januari", 2: "februari", 3: "maret", 4: "april", 5: "mei", 6: "juni",
+               7: "juli", 8: "agustus", 9: "september", 10: "oktober", 11: "november", 12: "desember"}
+
+
+def _norm_cell(tab, col, v):
+    """Coerce one incoming cell to its column type. Never invents: junk -> None."""
+    if v is None or v == "":
+        return None
+    if col in MAP_NUM.get(tab, ()):
+        s = str(v).strip().split("/")[0].strip()
+        if s and re.fullmatch(r"[-\d.,]+", s):
+            if "," in s and ("." in s or re.search(r",\d{1,2}$", s)):
+                s2 = s.replace(".", "").replace(",", ".")
+            else:
+                s2 = s.replace(",", "")
+            try:
+                f = float(s2)
+            except ValueError:
+                return None
+            return f if abs(f) < 1e12 else None      # OCR money-misread guard (no-guess)
+        return None
+    if col in MAP_DATE.get(tab, set()):
+        s = str(v).strip().lower()
+        m = re.match(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", s)
+        if m:
+            d, mo, y = (int(m.group(i)) for i in (1, 2, 3)); y += 2000 if y < 100 else 0
+            try: return datetime.date(y, mo, d).isoformat()
+            except ValueError: return None
+        m = re.match(r"(\d{1,2})[/-]([a-z]{3})[/-](\d{2,4})", s)
+        if m and m.group(2).upper() in MONTHS:
+            y = int(m.group(3)); y += 2000 if y < 100 else 0
+            try: return datetime.date(y, MONTHS[m.group(2).upper()], int(m.group(1))).isoformat()
+            except ValueError: return None
+        m = re.match(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", s)
+        if m:
+            mon = {v3: k for k, v3 in MONTHS_FULL.items()}.get(m.group(2))
+            if mon:
+                try: return datetime.date(int(m.group(3)), mon, int(m.group(1))).isoformat()
+                except ValueError: return None
+        return None
+    if col == "source_page":
+        m = re.search(r"p?(\d+)", str(v))
+        return int(m.group(1)) if m else None
+    return str(v).strip()[:280] or None
+
+
+def gate_rows(tab, rows):
+    """Hard rules (knowledge/po_rules.json, user policy) enforced SERVER-side.
+    Returns list of rejection strings; empty = accept. Arithmetic mismatch does NOT
+    reject but DEMOTES MAPPED -> REVIEW-ARITH (honest status beats invented numbers)."""
+    errs = []
+    for i, r in enumerate(rows):
+        if tab == "po_customer":
+            if not str(r.get("product_name") or "").strip():
+                errs.append(f"row{i}: product_name required (PO rule)"); continue
+            bad = next((f for f in ("po_issuer", "vendor_code")
+                        if "sarana abadi" in str(r.get(f) or "").lower()), None)
+            if bad:
+                errs.append(f"row{i}: SAMB never a {bad}"); continue
+            ppn = r.get("ppn")
+            if ppn not in (None, "", "11%", "1.1%"):
+                errs.append(f"row{i}: PPN must be 11%/1.1% (got {ppn})"); continue
+            q, p, d, t = (r.get(c) for c in ("qty", "unit_price", "discount", "total"))
+            if None not in (q, p, t) and str(r.get("mapping_status") or "").startswith("MAPPED"):
+                net = q * p - (d or 0.0)
+                ok = abs(net - t) <= max(1.0, abs(t) * 0.02)
+                if not ok and ppn:
+                    f = 1.11 if ppn == "11%" else 1.011
+                    ok = abs(net * f - t) <= max(1.0, abs(t) * 0.02)
+                if not ok:
+                    r["mapping_status"] = "REVIEW-ARITH|" + str(r.get("mapping_status") or "")
+        if tab == "faktur_pajak":
+            v, dpp = r.get("ppn"), r.get("dasar_pengenaan_pajak")
+            if v is not None and dpp:
+                if not any(abs(dpp * f - v) <= max(500.0, abs(v) * 0.01) for f in (0.11, 0.011)):
+                    r["review_status"] = ((r.get("review_status") or "") + ";PPN-DPP-MISMATCH").strip(";")
+    return errs
+
+
+def _tab_guess(folder, rel_path, filename):
+    fp = urllib.parse.unquote(str(rel_path or filename or "")).lower()
+    if "faktur pajak" in fp: return "faktur_pajak"
+    if "faktur penjualan" in fp or re.search(r"(^|/)1 f", fp): return "faktur_penjualan"
+    if re.search(r"purchase order|(^|/)2 po", fp): return "po_customer"
+    if re.search(r"ttg|receiving|terima barang|bukti penerimaan|supply sheet|good receipt|bpb|penerimaan barang", fp):
+        return "tanda_terima"
+    return "other"
+
+
+def _map_enqueue(doc_ids):
+    """Queue docs for mapping (idempotent; done tasks are NOT resurrected)."""
+    n = 0
+    try:
+        with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            for did in doc_ids:
+                cur.execute("SELECT folder, rel_path, filename FROM documents WHERE id=%s", (did,))
+                r = cur.fetchone()
+                if not r: continue
+                g = _tab_guess(r["folder"], r["rel_path"], r["filename"])
+                cur.execute(
+                    """INSERT INTO map_tasks(document_id, folder, rel_path, tab_guess)
+                       VALUES(%s,%s,%s,%s)
+                       ON CONFLICT (document_id) DO UPDATE
+                         SET tab_guess=EXCLUDED.tab_guess, folder=EXCLUDED.folder,
+                             rel_path=EXCLUDED.rel_path, updated_at=now()
+                       WHERE map_tasks.status IN ('pending','failed','claimed')""",
+                    (did, r["folder"], r["rel_path"], g))
+                if cur.rowcount: n += 1
+    except Exception as e:
+        print("MAP-ENQUEUE failed:", str(e)[:200], flush=True)
+    if n: print("MAP-ENQUEUE", n, flush=True)
+    return n
+
+
+@app.post("/mapping/enqueue")
+async def mapping_enqueue(request: Request):
+    """Manual/backfill enqueue: {"document_ids":[...]} or {"folder":"Complete bundles%"} or {"all":true}."""
+    body = {}
+    try: body = await request.json()
+    except Exception: pass
+    ids = []
+    with db() as c, c.cursor() as cur:
+        if body.get("document_ids"):
+            ids = list(body["document_ids"])
+        elif body.get("folder"):
+            cur.execute("SELECT id FROM documents WHERE folder LIKE %s AND status IN ('VALIDATED','DELIVERED')",
+                        (body["folder"],)); ids = [r[0] for r in cur.fetchall()]
+        elif body.get("all"):
+            cur.execute("SELECT id FROM documents WHERE status IN ('VALIDATED','DELIVERED')"); ids = [r[0] for r in cur.fetchall()]
+    return {"requested": len(ids), "enqueued": _map_enqueue(ids)}
+
+
+@app.get("/mapping/pending")
+def mapping_pending(limit: int = 50, folder: str = ""):
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        q = """SELECT t.document_id, t.folder, t.rel_path, t.tab_guess, t.status, t.attempts, t.error,
+                      d.filename, d.status AS doc_status
+               FROM map_tasks t JOIN documents d ON d.id = t.document_id
+               WHERE t.status IN ('pending','failed')
+                 AND d.status IN ('VALIDATED','DELIVERED')"""
+        args = []
+        if folder: q += " AND t.folder LIKE %s"; args.append(folder)
+        q += " ORDER BY t.created_at LIMIT %s"; args.append(min(int(limit), 500))
+        cur.execute(q, args)
+        tasks = [dict(r) for r in cur.fetchall()]
+    return {"count": len(tasks), "tasks": tasks}
+
+
+@app.post("/mapping/claim")
+async def mapping_claim(request: Request):
+    body = await request.json()
+    ids = list(body.get("document_ids") or [])
+    engine = str(body.get("engine") or "hermes")[:20]
+    with db() as c, c.cursor() as cur:
+        cur.execute("""UPDATE map_tasks SET status='claimed', engine=%s, claimed_at=now(),
+                              attempts=attempts+1, updated_at=now()
+                       WHERE document_id = ANY(%s) AND status IN ('pending','failed')
+                       RETURNING document_id""", (engine, ids))
+        got = [r[0] for r in cur.fetchall()]
+    return {"claimed": got}
+
+
+@app.post("/documents/{doc_id}/mapping/rows")
+async def mapping_rows(doc_id: str, request: Request):
+    """Engine submits mapped rows for ONE target tab. Server: normalizes types,
+    enforces rules (gate_rows), replaces this doc's rows for this tab, marks task mapped."""
+    body = await request.json()
+    tab = body.get("tab")
+    rows = list(body.get("rows") or [])
+    if tab not in MAP_COLS:
+        raise HTTPException(400, f"unknown tab {tab!r} (valid: {sorted(MAP_COLS)})")
+    if len(rows) > 2000:
+        raise HTTPException(400, "too many rows in one POST")
+    recs = []
+    for i, r in enumerate(rows):
+        rec = {c: _norm_cell(tab, c, r.get(c)) for c in MAP_COLS[tab]}
+        if tab == "po_customer" and not rec["product_name"]:
+            raise HTTPException(422, f"row{i}: product_name required")
+        recs.append(rec)
+    errs = gate_rows(tab, recs)
+    if errs:
+        raise HTTPException(422, {"rejected": errs[:25]})
+    rel = body.get("rel_path"); folder = body.get("folder")
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT folder, rel_path, filename FROM documents WHERE id=%s", (doc_id,))
+        drow = cur.fetchone()
+        if not drow:
+            raise HTTPException(404, "document not found")
+        folder = folder or drow["folder"]
+        rel = rel or drow["rel_path"]
+        cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (doc_id,))
+        written = 0
+        for i, rec in enumerate(recs):
+            rec.update(document_id=doc_id, folder=folder, rel_path=rel,
+                       natural_key=f"{doc_id}|{tab}|{i}",
+                       source_file=Path(str(drow["filename"] or "")).stem)
+            if tab in ("faktur_pajak", "faktur_penjualan") and rec.get("source_page") is None:
+                rec["source_page"] = 0
+            if not str(rec.get("mapping_status") or "").strip():
+                rec["mapping_status"] = "MAPPED"
+            cols = list(rec)
+            cur.execute(
+                f"INSERT INTO {tab} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
+                f"ON CONFLICT (natural_key) DO UPDATE SET "
+                f"{', '.join(f'{x}=EXCLUDED.{x}' for x in cols if x != 'natural_key')}, updated_at=now()",
+                [rec[x] for x in cols])
+            written += 1
+        cur.execute("""UPDATE map_tasks SET status='mapped', mapped_at=now(), error=NULL, updated_at=now()
+                       WHERE document_id=%s""", (doc_id,))
+        cur.execute("""UPDATE map_tasks SET rows_summary =
+                       (SELECT COALESCE(jsonb_object_agg(k, v), '{}'::jsonb) FROM (
+                          SELECT 'faktur_pajak' k, (SELECT count(*) FROM faktur_pajak WHERE document_id=%s) v
+                          UNION SELECT 'faktur_penjualan', (SELECT count(*) FROM faktur_penjualan WHERE document_id=%s)
+                          UNION SELECT 'po_customer', (SELECT count(*) FROM po_customer WHERE document_id=%s)
+                          UNION SELECT 'tanda_terima', (SELECT count(*) FROM tanda_terima WHERE document_id=%s)) x)
+                       WHERE document_id=%s""", (doc_id, doc_id, doc_id, doc_id, doc_id))
+    return {"document_id": doc_id, "tab": tab, "written": written}
+
+
+@app.post("/mapping/{doc_id}/note")
+async def mapping_note(doc_id: str, request: Request):
+    """Engine reports outcome without rows (no parser / needs review): status=review|failed|mapped + error."""
+    body = await request.json()
+    st = body.get("status") if body.get("status") in ("review", "failed", "mapped") else "review"
+    with db() as c, c.cursor() as cur:
+        cur.execute("UPDATE map_tasks SET status=%s, error=%s, updated_at=now() WHERE document_id=%s",
+                    (st, str(body.get("error") or "")[:400], doc_id))
+    return {"document_id": doc_id, "status": st}
+
+
+@app.post("/mapping/{doc_id}/unmap")
+def mapping_unmap(doc_id: str):
+    """Clear this doc's mapped rows (all 4 tabs) and re-queue."""
+    with db() as c, c.cursor() as cur:
+        n = 0
+        for t in MAP_COLS:
+            cur.execute(f"DELETE FROM {t} WHERE document_id=%s", (doc_id,)); n += cur.rowcount
+        cur.execute("""UPDATE map_tasks SET status='pending', error=NULL, claimed_at=NULL,
+                       mapped_at=NULL, rows_summary='{}'::jsonb, updated_at=now() WHERE document_id=%s""", (doc_id,))
+    return {"document_id": doc_id, "deleted_rows": n}
+
+
+@app.get("/mapping/status")
+def mapping_status():
+    """Monitor aggregate for /view/mapping."""
+    out = {"tasks": {}, "tabs": {}, "folders": []}
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT status, count(*) n FROM map_tasks GROUP BY 1")
+        out["tasks"] = {r["status"]: r["n"] for r in cur.fetchall()}
+        cur.execute("SELECT COALESCE(folder,'(no folder)') f, tab_guess, status, count(*) n "
+                    "FROM map_tasks GROUP BY 1,2,3 ORDER BY 1,2")
+        agg = {}
+        for r in cur.fetchall():
+            a = agg.setdefault(r["f"], {"folder": r["f"], "total": 0})
+            a["total"] += r["n"]; a[r["status"]] = a.get(r["status"], 0) + r["n"]
+        out["folders"] = sorted(agg.values(), key=lambda x: -x["total"])[:30]
+        for t in MAP_COLS:
+            cur.execute(f"SELECT count(*) n, "
+                        f"count(*) FILTER (WHERE COALESCE(mapping_status,'') LIKE 'MAPPED%') m, "
+                        f"count(*) FILTER (WHERE COALESCE(review_status,'') LIKE '%REVIEW%') rv FROM {t}")
+            rr = cur.fetchone()
+            out["tabs"][t] = {"rows": rr["n"], "mapped": rr["m"], "review": rr["rv"]}
+    return out
+
+
+@app.get("/mapping/rules")
+def mapping_rules():
+    """Rules digest — single source of truth for BOTH engines (hermes parsers + api LLM)."""
+    out = {"tables": MAP_COLS}
+    for name in ("po_rules.json", "issuers.json", "variants.json", "overrides.json"):
+        p = KNOWLEDGE_DIR / name
+        try:
+            out[name.replace(".json", "")] = json.loads(p.read_text())
+        except Exception:
+            out[name.replace(".json", "")] = None
+    return out
+
+
+MAPPING_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>Doc Pipeline — Mapping</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:980px;padding:0 1rem;color:#1b1f24}
+h1{font-size:1.3rem;font-weight:650}a{color:#0b6bcb;text-decoration:none}a:hover{text-decoration:underline}
+.chips{display:flex;gap:.6rem;flex-wrap:wrap;margin:.6rem 0 1.2rem}
+.chip{border:1px solid #d6dbe1;border-radius:8px;padding:.4rem .8rem;background:#fff}
+.chip b{font-size:1.15rem;display:block}.chip span{color:#57606a;font-size:.8rem;text-transform:capitalize}
+table{border-collapse:collapse;width:100%;margin-bottom:1.4rem}
+th,td{border-bottom:1px solid #e8ebef;padding:.35rem .5rem;text-align:left;font-size:.86rem}
+th{color:#57606a;font-weight:600}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:3px;background:#e8ebef;overflow:hidden;min-width:120px}
+.bar i{display:block;height:100%;background:#1a7f37}
+.st{padding:.1rem .5rem;border-radius:99px;font-size:.78rem;font-weight:600;margin-right:.3rem;display:inline-block}
+.st.mapped{background:#dcf5e3;color:#1a7f37}.st.pending{background:#eef1f5;color:#57606a}
+.st.claimed{background:#fff3d6;color:#8a6100}.st.failed{background:#fde2e2;color:#b42318}
+.st.review{background:#e7ecff;color:#3349a9}
+h2{font-size:1rem;margin:1.4rem 0 .4rem;color:#333}</style></head><body>
+<h1>Mapping monitor</h1>
+<div style="color:#57606a">flow: upload &rarr; OCR &rarr; map &rarr; this queue &rarr; Google Sheet export &middot; <a href="/view">documents</a> &middot; <a href="/view/upload">upload</a></div>
+<div class="chips" id="chips"></div><div id="tabs"></div><h2>Folders</h2><div id="folds"></div>
+<h2>Needs attention (review/failed docs)</h2><div id="att"></div>
+<p style="color:#8a929b;font-size:.8rem">auto-refresh 5s &middot; rules: <a href="/mapping/rules">/mapping/rules</a></p>
+<script>
+const TCOL={pending:1,claimed:1,mapped:1,failed:1,review:1};
+async function showRows(id){const p=document.getElementById('rowdetail');p.style.display='block';p.textContent='loading...';
+ const r=await (await fetch('/mapping/rows?document_id='+id)).json();
+ let o='';for(const [t,rows] of Object.entries(r.tabs)){if(!rows.length)continue;o+=t+' ('+rows.length+')\n';
+  for(const x of rows)o+='  '+JSON.stringify(x).slice(0,220)+'\n'}
+ p.textContent=o||'(no rows yet — parser did not produce any for this doc)';}
+async function tick(){try{
+ const s=await (await fetch('/mapping/status')).json();
+ let c='';for(const k of ['pending','claimed','mapped','review','failed']){if(s.tasks[k])c+='<div class="chip"><b>'+s.tasks[k]+'</b><span>'+k+'</span></div>'}
+ let tr=Object.values(s.tasks).reduce((a,b)=>a+b,0);c+='<div class="chip"><b>'+tr+'</b><span>queued docs</span></div>';
+ document.getElementById('chips').innerHTML=c;
+ let t='<table><tr><th>target table</th><th class=num>rows</th><th class=num>MAPPED</th><th class=num>REVIEW</th></tr>';
+ for(const [k,v] of Object.entries(s.tabs))t+='<tr><td>'+k+'</td><td class=num>'+v.rows+'</td><td class=num>'+v.mapped+'</td><td class=num>'+v.review+'</td></tr>';
+ document.getElementById('tabs').innerHTML=t+'</table>';
+ let f='<table><tr><th>folder</th><th class=num>docs</th><th>progress</th><th>states</th></tr>';
+ for(const x of s.folders){const pct=x.total?Math.round(100*(x.mapped||0)/x.total):0;
+  let st=Object.entries(x).filter(([k])=>TCOL[k]).map(([k,v])=>'<span class="st '+k+'">'+v+' '+k+'</span>').join('');
+  f+='<tr><td>'+(x.folder||'').slice(0,44)+'</td><td class=num>'+x.total+'</td><td><div class="bar"><i style="width:'+pct+'%"></i></div></td><td>'+st+'</td></tr>';}
+ document.getElementById('folds').innerHTML=f+'</table>';
+ const a=await (await fetch('/mapping/rows?limit=12')).json();
+ let ah='<table><tr><th>document</th><th>tab</th><th>status</th><th>note</th><th></th></tr>';
+ for(const x of (a.attention||[])){ah+='<tr><td>'+(x.rel_path||x.filename||'').slice(-52)+'</td><td>'+x.tab_guess+'</td><td><span class="st '+x.status+'">'+x.status+'</span></td><td>'+(x.error||'').slice(0,40)+'</td><td><a href="/view/'+x.document_id+'">ocr</a> &middot; <a href="javascript:showRows(\''+x.document_id+'\')">rows</a></td></tr>'}
+ document.getElementById('att').innerHTML=ah+'</table><pre id="rowdetail" style="max-height:300px;overflow:auto;background:#0b1020;color:#cfe3ff;padding:10px;border-radius:8px;font-size:11px;display:none"></pre>';
+}catch(e){}}tick();setInterval(tick,5000);
+</script></body></html>"""
+
+
+@app.get("/mapping/rows")
+def mapping_rows_list(document_id: str = "", tab: str = "", folder: str = "", limit: int = 200):
+    """Drill-down: actual mapped rows. ?document_id=.. | ?tab=po_customer&folder=.. (newest first)."""
+    tab = tab if tab in MAP_COLS else ""
+    lim = max(1, min(int(limit), 1000))
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if document_id:
+            tabs = [tab] if tab else list(MAP_COLS)
+            res = {}
+            for t in tabs:
+                cur.execute(f"SELECT * FROM {t} WHERE document_id=%s ORDER BY natural_key", (document_id,))
+                res[t] = [dict(r) for r in cur.fetchall()]
+            return {"document_id": document_id, "tabs": res}
+        if tab:
+            q = f"SELECT * FROM {tab} WHERE 1=1"; args = []
+            if folder: q += " AND folder LIKE %s"; args.append(folder)
+            q += " ORDER BY updated_at DESC LIMIT %s"; args.append(lim)
+            cur.execute(q, args)
+            return {"tab": tab, "rows": [dict(r) for r in cur.fetchall()]}
+        cur.execute("""SELECT t.document_id, t.tab_guess, t.status, t.error, t.rows_summary,
+                              d.folder, d.rel_path, d.filename
+                       FROM map_tasks t JOIN documents d ON d.id=t.document_id
+                       WHERE t.status IN ('review','failed')
+                       ORDER BY t.updated_at DESC LIMIT %s""", (lim,))
+        return {"attention": [dict(r) for r in cur.fetchall()]}
+
+
+@app.get("/view/mapping", response_class=HTMLResponse)
+def view_mapping():
+    return MAPPING_HTML
+
+
+# ---------------- mapping engine settings (like /settings/ocr — same Token Plan key style) ----
+MAP_CONFIG_PATH = Path(os.environ.get("MAP_CONFIG_PATH", "/data/map_config.json"))
+_map_cfg_cache = {"mtime": None, "cfg": None}
+
+def load_map_config():
+    """mtime-cached: UI save is live on the next call, Falls back to the
+    OCR config's key/endpoint (same Token Plan) when mapping fields are absent."""
+    try:
+        mt = MAP_CONFIG_PATH.stat().st_mtime
+    except OSError:
+        mt = None
+    if mt is None:
+        cfg = {}
+    elif _map_cfg_cache["mtime"] != mt:
+        try:
+            cfg = json.loads(MAP_CONFIG_PATH.read_text())
+        except Exception:
+            cfg = {}
+        _map_cfg_cache.update(mtime=mt, cfg=cfg)
+    else:
+        cfg = _map_cfg_cache["cfg"]
+    base = {"endpoint": os.environ.get("MAP_URL", ""),
+            "model": os.environ.get("MAP_MODEL", ""),
+            "key": os.environ.get("MAP_API_KEY", ""),
+            "engine": os.environ.get("MAP_ENGINE", "hermes"),
+            "auto": os.environ.get("MAP_AUTO", "0")}
+    for k, v in base.items():
+        if not cfg.get(k):
+            cfg[k] = v
+    if not cfg.get("key") or not cfg.get("endpoint"):
+        ocr = load_ocr_config()
+        cfg.setdefault("endpoint", ocr.get("endpoint", ""))
+        cfg.setdefault("key", ocr.get("key", ""))
+        cfg.setdefault("model", ocr.get("model", ""))
+    cfg["model"] = cfg.get("model") or ocr.get("model", "") if "ocr" in dir() else cfg.get("model", "")
+    return cfg
+
+
+def save_map_config(cfg):
+    cfg = {k: v for k, v in cfg.items() if k in ("endpoint", "model", "key", "engine", "auto")}
+    if cfg.get("endpoint"):
+        cfg["endpoint"] = normalize_chat_url(cfg["endpoint"])
+    MAP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MAP_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=1))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, MAP_CONFIG_PATH)
+    _map_cfg_cache["mtime"] = None
+    return cfg
+
+
+def _map_rules_digest():
+    """Compact rules brief for the prompt — the SAME knowledge files the deterministic
+    parsers use (single source of truth)."""
+    brief = []
+    try:
+        pr = json.loads((KNOWLEDGE_DIR / "po_rules.json").read_text())
+        for k in ("ppn_rates", "total_formula", "issuer_is_customer", "samb_never_issuer_vendor",
+                  "product_name_required", "no_guess"):
+            if k in pr:
+                brief.append(f"{k}: {json.dumps(pr[k], ensure_ascii=False)[:220]}")
+    except Exception:
+        pass
+    try:
+        iss = json.loads((KNOWLEDGE_DIR / "issuers.json").read_text())
+        pairs = [f"{b}=>{v.get('pt')}" for b, v in list(iss.items())[:40] if isinstance(v, dict) and v.get("pt")]
+        if pairs:
+            brief.append("known brand->PT aliases: " + "; ".join(pairs)[:900])
+    except Exception:
+        pass
+    return "\n".join(brief)
+
+
+def map_prompt(tab, rel_path, text):
+    cols = ", ".join(MAP_COLS[tab])
+    return (
+        "You map Indonesian supplier documents into one target table. Use ONLY values that appear in the text; "
+        "leave a field null when unreadable — NEVER invent. Follow these rules exactly:\n"
+        + _map_rules_digest() +
+        f"\n\nTARGET TABLE {tab} columns: {cols}.\n"
+        + ("PO rows MUST carry product_name; drop rows without a product name. "
+           "po_issuer = the CUSTOMER company (PT), never SAMB/PT Sarana Abadi Makmur Bersama.\n"
+           if tab == "po_customer" else "")
+        + ("Ppn column format like '11%' or '1.1%'.\n" if tab == "po_customer" else "")
+        + ("Dates dd/mm/yyyy or '16 September 2026' -> keep as written.\n" if tab in ("faktur_pajak", "tanda_terima") else "")
+        + f"\nSource path hint: {rel_path}\n\nDOCUMENT TEXT:\n" + (text or "")[:24000] +
+        "\n\nReply with JSON only: {\"rows\": [ {col: value or null, ...}, ... ]}"
+    )
+
+
+@app.post("/mapping/run")
+async def mapping_run(request: Request):
+    """Engine 'api': one document -> LLM with rules digest -> gated rows POST.
+    Body: {"document_id":"...", "tab":"auto|po_customer|..."} or {"batch":N} for pending."""
+    body = await request.json()
+    cfg = load_map_config()
+    if not cfg.get("key"):
+        raise HTTPException(400, "map API key not configured — /view/settings")
+    dids = [body["document_id"]] if body.get("document_id") else []
+    if not dids:
+        with db() as c, c.cursor() as cur:
+            cur.execute("""SELECT t.document_id FROM map_tasks t JOIN documents d ON d.id=t.document_id
+                           WHERE t.status IN ('pending','failed') AND d.status IN ('VALIDATED','DELIVERED')
+                           ORDER BY t.created_at LIMIT %s""", (int(body.get("batch", 1)),))
+            dids = [r[0] for r in cur.fetchall()]
+    if not dids:
+        return {"ran": 0, "note": "nothing pending"}
+    done = []
+    for did in dids:
+        try:
+            with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT standard_json, folder, rel_path, filename FROM documents WHERE id=%s", (did,))
+                d = cur.fetchone()
+            if not d:
+                continue
+            std = d["standard_json"] or {}
+            text = "\n".join((p.get("text") or "") for p in sorted(std.get("pages", []), key=lambda x: x.get("page", 0)))
+            tab = body.get("tab") or "auto"
+            if tab == "auto":
+                with db() as c, c.cursor() as cur:
+                    cur.execute("SELECT tab_guess FROM map_tasks WHERE document_id=%s", (did,))
+                    r = cur.fetchone()
+                tab = r[0] if r else "other"
+            if tab not in MAP_COLS:
+                await _post_note(did, "review", f"no target tab guess for {d['filename']}")
+                continue
+            with db() as c3, c3.cursor() as cur3:
+                cur3.execute("UPDATE map_tasks SET status='claimed', engine='api', attempts=attempts+1, updated_at=now() WHERE document_id=%s AND status IN ('pending','failed')", (did,))
+            prompt = map_prompt(tab, d["rel_path"], text)
+            payload = json.dumps({"model": cfg["model"], "temperature": 0,
+                                  "messages": [{"role": "user", "content": prompt}]}).encode()
+            req = urllib.request.Request(normalize_chat_url(cfg["endpoint"]), data=payload,
+                                         headers={"Content-Type": "application/json",
+                                                  "Authorization": f"Bearer {cfg['key']}"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                out = json.loads(resp.read())
+            content = out["choices"][0]["message"]["content"]
+            m = re.search(r"\{.*\}", content, re.S)
+            rows = json.loads(m.group(0))["rows"] if m else []
+            if not rows:
+                await _post_note(did, "review", "engine returned no rows")
+                done.append({"document_id": did, "tab": tab, "written": 0, "note": "no rows"})
+                continue
+            w = await _write_rows(did, tab, rows)
+            done.append({"document_id": did, "tab": tab, "written": w})
+        except Exception as e:
+            await _post_note(did, "failed", str(e)[:300])
+            done.append({"document_id": did, "error": str(e)[:200]})
+    return {"ran": len(done), "results": done}
+
+
+async def _post_note(did, status, error):
+    with db() as c, c.cursor() as cur:
+        cur.execute("UPDATE map_tasks SET status=%s, error=%s, updated_at=now() WHERE document_id=%s",
+                    (status, error[:400], did))
+
+
+async def _write_rows(did, tab, rows):
+    """Reuse the gated writer by calling the endpoint function in-process."""
+    from fastapi import Request as _R  # noqa - body passed directly
+    recs, errs = [], []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            errs.append(f"row{i}: not object"); continue
+        rec = {c: _norm_cell(tab, c, r.get(c)) for c in MAP_COLS[tab]}
+        if tab == "po_customer" and not rec["product_name"]:
+            errs.append(f"row{i}: product_name required"); continue
+        recs.append(rec)
+    errs += gate_rows(tab, recs)
+    if errs and not recs:
+        raise HTTPException(422, {"rejected": errs[:25]})
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT folder, rel_path, filename FROM documents WHERE id=%s", (did,))
+        drow = cur.fetchone()
+        cur.execute(f"DELETE FROM {tab} WHERE document_id=%s", (did,))
+        written = 0
+        for i, rec in enumerate(recs):
+            rec.update(document_id=did, folder=drow["folder"], rel_path=drow["rel_path"],
+                       natural_key=f"{did}|{tab}|{i}", source_file=Path(str(drow["filename"] or "")).stem)
+            if tab in ("faktur_pajak", "faktur_penjualan") and rec.get("source_page") is None:
+                rec["source_page"] = 0
+            if not str(rec.get("mapping_status") or "").strip():
+                rec["mapping_status"] = "MAPPED"
+            cols = list(rec)
+            cur.execute(
+                f"INSERT INTO {tab} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
+                f"ON CONFLICT (natural_key) DO UPDATE SET "
+                f"{', '.join(f'{x}=EXCLUDED.{x}' for x in cols if x != 'natural_key')}, updated_at=now()",
+                [rec[x] for x in cols])
+            written += 1
+        cur.execute("""UPDATE map_tasks SET status='mapped', mapped_at=now(), error=NULL, updated_at=now()
+                       WHERE document_id=%s""", (did,))
+        cur.execute("""UPDATE map_tasks SET rows_summary =
+                       (SELECT COALESCE(jsonb_object_agg(k, v), '{}'::jsonb) FROM (
+                          SELECT 'faktur_pajak' k, (SELECT count(*) FROM faktur_pajak WHERE document_id=%s) v
+                          UNION SELECT 'faktur_penjualan', (SELECT count(*) FROM faktur_penjualan WHERE document_id=%s)
+                          UNION SELECT 'po_customer', (SELECT count(*) FROM po_customer WHERE document_id=%s)
+                          UNION SELECT 'tanda_terima', (SELECT count(*) FROM tanda_terima WHERE document_id=%s)) x)
+                       WHERE document_id=%s""", (did, did, did, did, did))
+    return written
+
+
+@app.get("/settings/map")
+def settings_map_get():
+    cfg = dict(load_map_config())
+    cfg["key"] = mask_key(cfg.get("key", ""))
+    return cfg
+
+
+@app.post("/settings/map")
+async def settings_map_post(request: Request):
+    body = await request.json()
+    if not _pin_ok(body):
+        raise HTTPException(403, "wrong PIN")
+    cfg = dict(load_map_config())
+    for k in ("endpoint", "model", "engine", "auto"):
+        if k in body:
+            cfg[k] = body[k]
+    if body.get("key") and not str(body["key"]).startswith(("****", "(empty)")):
+        cfg["key"] = body["key"]
+    cfg = save_map_config(cfg)
+    cfg_out = dict(cfg); cfg_out["key"] = mask_key(cfg.get("key", ""))
+    return {"saved": True, "config": cfg_out}
+
+
+@app.post("/settings/map/test")
+async def settings_map_test(request: Request):
+    """Dry-run the mapping engine on ONE real document (no DB write) — like /settings/ocr/test."""
+    import urllib.error
+    body = await request.json()
+    cfg = {**load_map_config(), **{k: v for k, v in body.items() if k in ("endpoint", "model", "key")
+                                   and not str(v).startswith(("****", "(empty)"))}}
+    if not cfg.get("key"):
+        raise HTTPException(400, "no API key")
+    did = body.get("document_id")
+    if not did:
+        with db() as c, c.cursor() as cur:
+            cur.execute("SELECT document_id FROM map_tasks WHERE status IN ('pending','failed') ORDER BY created LIMIT 1")
+            r = cur.fetchone(); did = r[0] if r else None
+    if not did:
+        raise HTTPException(400, "no pending document to test on")
+    with db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT standard_json, rel_path, folder, tab_guess FROM map_tasks t LEFT JOIN documents d ON d.id=t.document_id WHERE t.document_id=%s", (did,))
+        row = cur.fetchone()
+    std = (row or {}).get("standard_json") or {}
+    text = "\n".join((p.get("text") or "") for p in sorted(std.get("pages", []) or [], key=lambda x: x.get("page", 0)))
+    tab = row["tab_guess"] if row else "po_customer"
+    if tab not in MAP_COLS:
+        tab = "po_customer"
+    prompt = map_prompt(tab, (row or {}).get("rel_path"), text)
+    t0 = time.time()
+    payload = json.dumps({"model": cfg.get("model") or "qwen3.8-flash", "temperature": 0,
+                          "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(normalize_chat_url(cfg["endpoint"]), data=payload,
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {cfg['key']}"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        hint = {401: "key rejected (401)", 404: "model not available (404)", 429: "rate limited (429)"}.get(e.code, str(e.code))
+        raise HTTPException(502, f"map endpoint said {hint}")
+    except Exception as e:
+        raise HTTPException(502, f"cannot reach endpoint: {type(e).__name__}: {str(e)[:120]}")
+    content = out["choices"][0]["message"]["content"]
+    m = re.search(r"\{.*\}", content, re.S)
+    rows = json.loads(m.group(0)).get("rows", []) if m else []
+    recs = []
+    for r in rows:
+        if isinstance(r, dict):
+            rec = {c: _norm_cell(tab, c, r.get(c)) for c in MAP_COLS[tab]}
+            if tab == "po_customer" and not rec["product_name"]:
+                continue
+            recs.append(rec)
+    errs = gate_rows(tab, recs)
+    usage = out.get("usage", {})
+    return {"ok": True, "document_id": did, "tab": tab, "seconds": round(time.time() - t0, 1),
+            "rows_returned": len(rows), "rows_valid": len(recs),
+            "gate_rejections": errs[:10], "sample": recs[:3],
+            "tokens": {"prompt": usage.get("prompt_tokens"), "completion": usage.get("completion_tokens")},
+            "rules_digest_chars": len(_map_rules_digest()), "prompt_chars": len(prompt)}
 
 
 @app.post("/documents/{doc_id}/correct")
@@ -2129,7 +2814,35 @@ async function saveCfg(force){
   say(r.ok?'ok':'err',(r.ok?'✓ saved & live: '+JSON.stringify(d.config):'✗ '+(d.detail||'')));
   if(r.ok)load();
 }
-load();
+<div class='card'>
+<h2 style='margin:0 0 6px'>Mapping AI (engine api)</h2>
+<p style='font-size:13px;color:#555;margin:0 0 8px'>Same Token Plan key style as OCR. Rules digest from <code>/knowledge/po_rules.json</code> + <code>issuers.json</code> is injected automatically. Engine <code>hermes</code> = deterministic parsers (default, zero API cost); <code>api</code> = LLM maps via /mapping/run.</p>
+<label>Engine
+<select id='m_engine'><option value='hermes'>hermes (parsers, free)</option><option value='api'>api (LLM token plan)</option><option value='hybrid'>hybrid (parsers first, LLM for REVIEW pages)</option></select></label>
+<label>Model (api)</label><input id='m_model' placeholder='qwen3.8-flash'>
+<label>Endpoint (api) — blank = reuse OCR endpoint</label><input id='m_endpoint' placeholder='https://...compatible-mode/v1'>
+<label>API key (api) — blank = keep saved</label><input id='m_key' type='password' placeholder='(saved)'>
+<label>Auto-map after OCR?
+<select id='m_auto'><option value='0'>no — queue only, I trigger</option><option value='1'>yes — enqueue+mapped automatically</option></select></label>
+<button onclick='saveMap()'>Save mapping settings</button> <button onclick='testMap()'>Test on 1 pending doc</button>
+<pre id='mout' style='white-space:pre-wrap;font-size:12px;background:#0b1020;color:#9fe870;padding:10px;border-radius:8px;display:none'></pre>
+</div>
+<script>
+async function loadMap(){const c=await(await fetch('/settings/map')).json();
+ m_engine.value=c.engine||'hermes'; m_model.value=c.model||''; m_endpoint.value=(c.endpoint&&c.endpoint!==c.ocr_endpoint)?c.endpoint:(c.endpoint||'');
+ m_key.placeholder=c.key||'(empty)'; m_auto.value=c.auto||'0';}
+function mbody(){const b={};if(m_engine.value)b.engine=m_engine.value;if(m_model.value)b.model=m_model.value;
+ if(m_endpoint.value)b.endpoint=m_endpoint.value;if(m_key.value)b.key=m_key.value;b.auto=m_auto.value;return b;}
+async function saveMap(){const o=document.getElementById('mout');o.style.display='block';o.textContent='saving...';
+ const r=await fetch('/settings/map',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(mbody())});
+ o.textContent=JSON.stringify(await r.json(),null,1);loadMap();}
+async function testMap(){const o=document.getElementById('mout');o.style.display='block';o.textContent='testing (reads 1 pending doc, no DB write)...';
+ const b=mbody();b.key=m_key.value||b.key;
+ const r=await fetch('/settings/map/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ let j;try{j=await r.json()}catch(e){o.textContent='HTTP '+r.status;return}
+ o.textContent=JSON.stringify(j,null,1);}
+loadMap();
+</script>load();
 </script></body></html>"""
 
 

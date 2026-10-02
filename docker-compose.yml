@@ -66,11 +66,15 @@ services:
       - OCR_WORKERS=${OCR_WORKERS:-4}
       - OCR_NUMERIC_VERIFY=${OCR_NUMERIC_VERIFY:-0}  # selective 2nd-pass numeric verification OFF (speed/cost)
       - MAP_AUTO=${MAP_AUTO:-0}
+      - MAP_ENGINE=${MAP_ENGINE:-hermes}
+      - MAP_CONFIG_PATH=/data/map_config.json
       - SETTINGS_PIN=${SETTINGS_PIN:-}
       - UPLOAD_DIR=/data/uploads
       - TARGET_API_URL=http://extractor:5000/mock/receiving
     volumes:
       - ./data:/data
+      - ./knowledge:/knowledge:ro
+      - ./scripts:/scripts:ro
     depends_on:
       db:
         condition: service_healthy
