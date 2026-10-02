@@ -2312,6 +2312,8 @@ def finalize_status(doc_id: str):
                     (json.dumps(std), json.dumps({"passed": ok, "flagged_fields": flags}), status, doc_id))
         c.commit()
         print("AUTO-OCR-FINALIZE", doc_id[:8], status, flush=True)
+    if status == "VALIDATED":
+        _map_enqueue([doc_id])  # late/asynchronous OCR completion still queues mapping
     return status
 
 

@@ -11,7 +11,7 @@ Usage:
   python3 scripts/map_engine.py --folder 'Complete bundles%' [--limit 200] [--dry-run]
   python3 scripts/map_engine.py --ids id1,id2
 """
-import argparse, collections, json, os, re, sys, urllib.request
+import argparse, collections, json, os, re, sys, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -208,6 +208,21 @@ def main():
     print("TOTAL:", dict(tot))
 
 
-if __name__ == "__main__":
-    import urllib.parse
+def _main_once(argv):
+    sys.argv = argv
     main()
+
+
+if __name__ == "__main__":
+    import time
+    if "--watch" in sys.argv:
+        argv = [a for a in sys.argv if a != "--watch"]
+        while True:
+            try:
+                _main_once(list(argv))
+            except Exception as e:
+                print("watch loop error:", repr(e)[:140])
+            print("watch: sleeping 20s", flush=True)
+            time.sleep(20)
+    else:
+        main()
