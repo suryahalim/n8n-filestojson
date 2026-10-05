@@ -37,7 +37,7 @@ IT document ingestion → extraction → validation → OCR → service-bus deli
 
 ## Configuration (single source: `~/doc-pipeline/.env`, gitignored, mode 600)
 
-**Current operating mode (OCR-only):** upload is automatically processed page by page. The output is `standard_json.pages[]` (one `{page,text}` object per page) plus raw OCR text; classification, splitting, mapping, invoice tables, and delivery are disabled by default with `MAP_AUTO=0`. Monitor with `GET /documents/{id}/progress`; retrieve the complete JSON/raw text with `GET /documents/{id}`. `OCR_MAX_PAGES=0` means every page.
+**Current operating mode:** uploads are processed page by page automatically (OCR). Output is `standard_json.pages[]` + raw OCR text. On every `VALIDATED` the document is **auto-enqueued to `map_tasks`** and mapped into the 4 target tables (see `MAPPING_GUIDE.md`) — deterministic engine `hermes` + LLM engine `api` for layout variants. `MAP_AUTO=1` in `.env` chains mapping right after OCR; with `MAP_AUTO=0` documents wait in the queue until an engine/watcher drains it (current live setting: `MAP_AUTO=0`, hermes watcher + `drain_review.py` do the work). Monitor: `/view/mapping`, `/mapping/status`; results: `/view/tables`.
 
 **Auto-chain OCR (since v1.4; n8n-independent since 2026-10-02):** uploading is end-to-end — flagged documents get OCR'd automatically right after intake (sequential pages per doc, multiple docs in parallel via `OCR_WORKERS`). The API answers immediately; poll `/documents/batch/status` or `GET /documents/folder/status` (folder jobs), or open `/view/<id>` while processing.
 
@@ -108,7 +108,16 @@ NOTE (honest limits, verified 2026-09-21): a 33-page multi-SO sales-booklet retu
 
 **Change OCR model:** open `http://<host>:5000/view/settings` → edit Model (or Fetch models) → Test → Save. Effective immediately — no restart. CLI fallback still works: edit `QWEN_MODEL` in `.env` + `docker compose up -d extractor` (only read when `data/ocr_config.json` absent). Verify model exists in plan first (404 = not available).
 
-## Batch mapping to Google Sheets (RPA result tables) — `scripts/batch_map.py`
+## Mapping results → 4 target tables (live flow) — see **`MAPPING_GUIDE.md`**
+
+Destination of record = Postgres tables `faktur_pajak`, `faktur_penjualan`, `po_customer`, `tanda_terima`
+(`db-init/08`, `09`, `10`). Chain: upload → auto-OCR → `map_tasks` queue → deterministic engine (`scripts/map_engine.py`,
+zero tokens) → LLM engine `api` (qwen3.8-flash Token Plan, `enable_thinking=false`) for layout variants →
+server gate (rules + arithmetic + provenance issuer fallback) → tables. Watcher: `map_engine.py --watch`;
+parallel drain: `scripts/drain_review.py 4 45`; audit: `scripts/audit_folders.py`. UI: `/view/tables`,
+`/view/mapping`; CSV: `/mapping/export.csv?tab=…`. Full facts, throughput numbers, and gotchas: `MAPPING_GUIDE.md`.
+
+## Batch mapping to Google Sheets (legacy RPA path) — `scripts/batch_map.py`
 
 The large-scale path proven on 1.276 real documents (1.257 e-Faktur PDFs + 19 scan booklets, ~12K OCR pages): map everything **deterministically, zero LLM tokens**, into a fresh copy of the `Result RPA` template.
 
@@ -148,6 +157,7 @@ docker exec dp-db psql -U pipeline -d pipeline -Atc \
 **House rules:** never commit `.env`, keys, or DB dumps (`backups/` is gitignored) — pre-push history scans enforced; bind host IPs in `docker-compose.yml` (this box exposes on localhost + Tailscale IP only).
 
 ## Pointers
+- **Mapping (current focus): `MAPPING_GUIDE.md`** — where results live, engines, gates, audit, throughput, gotchas
 - Operations & UI walkthrough: `USAGE.md` · UI test suite (U-series) + batch mapping suite (M-series §9): `TESTING.md` · OCR-focused playbook (T1–T8): `OCR_TEST_PLAYBOOK.md`
 - MVP AR design: `MVP_AR_RECON_DESIGN.md` · Ten-document pilot and mixed-PDF child test: `MVP_10_DOCUMENT_TEST.md` · Mixed-PDF live test: `TESTING.md` U13
 - Receiving contract: `TESTING.md` §4 · Real endpoint switch: set `TARGET_API_URL`

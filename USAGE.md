@@ -96,7 +96,8 @@ Data locations: uploads `~/doc-pipeline/data/uploads/` (deduped by sha256 prefix
 ## 7. Where things plug in next
 
 - **Real receiving API**: set `TARGET_API_URL` in `docker-compose.yml` (extractor env) to your actual endpoint instead of `/mock/receiving`.
-- **Google Sheets mapping**: stays agent-side (`scripts/batch_map.py` + `po_v2.py`), triggered manually per user policy (`MAP_AUTO=0`) — see `RESUME.md`.
+- **Mapping results (DB is destination):** UI `http://<host>:5000/view/tables` (grid + CSV per tab), monitor `http://<host>:5000/view/mapping`. Full guide: `MAPPING_GUIDE.md`.
+- **Google Sheets export**: optional/legacy agent-side path (`scripts/batch_map.py` + `po_v2.py`, manual) — see `RESUME.md`.
 - **Other input channels** (email, Google Drive, WhatsApp): POST multipart to `/documents` or `/documents/folder` — the pipeline stays identical.
 - **Later ERP RPA**: read/claim the Postgres ledger via `/invoices` endpoints (zero LLM tokens).
 

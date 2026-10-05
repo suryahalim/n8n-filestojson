@@ -30,9 +30,9 @@ Semua file yang disebut di sini sudah ter-commit dan ter-push ke `origin/main`.
 - Provenance tersimpan di kolom `documents.folder` + `rel_path` (migrasi db-init/07 — sudah diterapkan live).
 
 
-## 1c. Latest state (2026-10-02 backup)
-- **"Complete bundles - 24 customers"** uploaded via /view/upload: 96 files → 95 docs (1 dup), 25 DELIVERED + 70 VALIDATED (all OCR'd). Provenance folder/rel_path per dokumen.
-- **Belum di-map ke Google Sheet** — ini kerjaan berikutnya: jalankan batch_map window folder bundle ini (bukan window lama; dokumen punya `folder='Complete bundles - 24 customers'`), rules PO v2 + item_fallback, lalu tulis + read-back. Snapshot OCR lengkap: `snapshots/bundle_docs_ocr_2026-10-02.json` (95 docs, halaman per-doc) + inventory CSV.
+## 1c. Latest state (2026-10-02 backup → SUPERSEDED by mapping run 2026-10-02/04)
+- **"Complete bundles - 24 customers" fully mapped into the 4 DB tables** (not Sheets): 94/94 documents `mapped`, verified per-folder with `scripts/audit_folders.py`. Live rows: faktur_pajak 103, faktur_penjualan 110 (all with `nama_pt`), po_customer 120 (AEON=8 items; every row has proven `po_issuer`, incl. ABC/Sari Apple → PT TOTALINDO SEGAR JAYA via folder provenance), tanda_terima 98.
+- Mapping flow, engines, gates, throughput + gotchas: **`MAPPING_GUIDE.md`** (read that, not the Sheets path below, for any new mapping work).
 - n8n removed 2026-10-02 (ddbd1f0) — arsip di archive/n8n-2026-10-02/. Jangan pakai :5678.
 
 
@@ -42,8 +42,7 @@ Empat tabel destination = 4 tab sheet, kolom 1:1, + view export persis header Go
 - `faktur_penjualan` (v_sheet_faktur_penjualan): Kode Material, SOR, Kemasan, Nama Produk, Qty, Harga, Disc1-5, Jumlah, DPP, PPN, Total, Source Page, Confidence, Review Status
 - `po_customer` (v_sheet_po_customer): 13 kolom v2 — product_name NOT NULL
 - `tanda_terima` (v_sheet_tanda_terima): Posting Date, Document No, PO No, Vendor Number, Item Code, Material Description, Qty, UON, Source Page, Mapping Status
-Loader idempoten: `docker exec dp-extractor python3 /tmp/load_target_tables.py /data/_load_dump.json` (script: `scripts/load_target_tables.py`; natural_key=upsert; numeric IDR-style parsed; >1e12 dianggap junk->NULL no-guess).
-Sudah dimuat DUMP FINAL 2026-10-01: fp 5091, fps 6218, po 940, tt 842 baris; document_id link 100%/93%/87%/97%. Alur baru: batch_map --dump -> load_target_tables -> export view ke sheet (atau query langsung untuk RPA).
+Loader idempoten: `scripts/load_target_tables.py` (natural_key=upsert; numeric IDR-style parsed; >1e12 dianggap junk->NULL no-guess). **UPDATE 2026-10-02/04: DB pernah TRUNCATE total (clean-test) — seed lama fp 5091/fps 6218/po 940/tt 842 tidak lagi di tabel; isi live sekarang = hasil bundle 94 dokumen (fp 103, fps 110, po 120, tt 98), cadangan seed aman di `snapshots/dump_final_2026-10-01.json`.** Alur baru: upload → OCR → queue → engine → gate → tabel (lihat `MAPPING_GUIDE.md`).
 
 ## 2. Rules PO (authoritative)
 Terdokumentasi di `knowledge/po_rules.json`; implementasi `scripts/po_v2.py` + `scripts/item_fallback.py`:
@@ -55,6 +54,9 @@ Terdokumentasi di `knowledge/po_rules.json`; implementasi `scripts/po_v2.py` + `
 6. **Setiap baris PO wajib punya Product Name**; baris tanpa nama dibuang dari tab (halaman mentahnya tetap di tab Review). Nama sampah header (`Halaman`, `TOTAL QTY`, `- Jumlah Kekurangan`) difilter.
 
 ## 3. Cara menjalankan ulang (pipeline lengkap)
+
+> **2026-10-04:** untuk destination DB (alur aktif), ikuti **`MAPPING_GUIDE.md`** — watcher `scripts/map_engine.py --watch` + `scripts/drain_review.py` + audit `scripts/audit_folders.py`. Instruksi Sheets di bawah = jalur legacy/opsional.
+
 ```bash
 cd ~/doc-pipeline
 # windows mapping yang dipakai (WAJIB sama dengan ini):
@@ -77,7 +79,7 @@ Extractor/OCR viewer: `http://100.68.212.36:5000` (container `dp-extractor`), st
 - ~191 halaman PO masih `PO-HEADER-NOITEMS`/raw-only di tab Review (scan jelek).
 - Issuer 3 baris `OCR_PAGE_REVIEW` lama (tanpa nama) sudah hilang dari tab; entri Review tetap sumber audit.
 - Viewer `f44358d3` (7000363000) di cache lama 166 halaman; API live 279 → korpus penuh untuk dokumen itu belum di-fetch ulang; halaman 167–279 belum dipetakan.
-- Jangan pernah set `MAP_AUTO=1`; mapping hanya atas izin user. `OCR_NUMERIC_VERIFY=0`.
+- **MAP_AUTO / queue:** `finalize_status` always ENQUEUEs validated docs to `map_tasks` (since 556a6bf) — the queue is the safety net and is not optional. `MAP_AUTO=1` additionally runs the deterministic engine inline; live setting is `MAP_AUTO=0` with the watcher (`map_engine.py --watch`) + drain doing mapping automatically, per user testing decision 2026-10-02. `OCR_NUMERIC_VERIFY=0`.
 
 ## 6. Konvensi kerja (jangan dilanggar)
 - Mapping hanya ke **copy**, backup snapshot sebelum menulis.

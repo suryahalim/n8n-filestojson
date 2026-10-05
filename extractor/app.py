@@ -801,7 +801,7 @@ MAP_SHEET_HEADERS = {
         "Potongan Harga", "Uang Muka", "PPN Dev", "PPnBM", "Harga Jual Total", "Source File"],
     "faktur_penjualan": ["Kode Material", "SOR", "Nama PT", "Kemasan", "Nama Produk", "Qty", "Harga",
         "Disc 1", "Disc 2", "Disc 3", "Disc 4", "Disc 5", "Jumlah", "Dasar Pengenaan Pajak",
-        "PPN", "Total", "Source Page", "Confidence", "Review Status"],
+                         "PPN", "Total", "Page Total", "Source Page", "Confidence", "Review Status"],
     "po_customer": ["Purchase Order No", "Vendor Code (SAMB @ client)", "PO Issuer (Customer)",
         "PPN", "Product Code", "Product Name", "Qty", "UON", "Unit Price", "Discount",
         "Total", "Source Page", "Mapping Status"],
@@ -815,7 +815,7 @@ MAP_EXPORT_COLS = {
         "ppn_dev", "ppnbm", "harga_jual_total", "coalesce(rel_path, source_file)"],
     "faktur_penjualan": ["kode_material", "sor", "nama_pt", "kemasan", "nama_produk", "qty", "harga",
         "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah", "dasar_pengenaan_pajak",
-        "ppn", "total", "source_page", "confidence", "coalesce(review_status, mapping_status)"],
+        "ppn", "total", "page_total", "source_page", "confidence", "coalesce(review_status, mapping_status)"],
     "po_customer": ["purchase_order_no", "vendor_code", "po_issuer", "ppn", "product_code",
         "product_name", "qty", "uon", "unit_price", "discount", "total", "source_page",
         "mapping_status"],
@@ -834,7 +834,7 @@ MAP_COLS = {
                      "source_file", "confidence", "review_status", "mapping_status"],
     "faktur_penjualan": ["kode_material", "sor", "nama_pt", "kemasan", "nama_produk", "qty", "harga",
                          "disc_1", "disc_2", "disc_3", "disc_4", "disc_5", "jumlah",
-                         "dasar_pengenaan_pajak", "ppn", "total", "source_page",
+                         "dasar_pengenaan_pajak", "ppn", "total", "page_total", "source_page",
                          "confidence", "review_status", "mapping_status"],
     "po_customer": ["purchase_order_no", "vendor_code", "po_issuer", "ppn", "product_code",
                     "product_name", "qty", "uon", "unit_price", "discount", "total",
@@ -846,7 +846,7 @@ MAP_COLS = {
 MAP_NUM = {t: {c for c in cols if c in (
     "dasar_pengenaan_pajak", "ppn", "qty", "harga_satuan", "jumlah_harga", "potongan_harga",
     "uang_muka", "ppn_dev", "ppnbm", "harga_jual_total", "harga", "disc_1", "disc_2",
-    "disc_3", "disc_4", "disc_5", "jumlah", "total", "unit_price", "discount")}
+    "disc_3", "disc_4", "disc_5", "jumlah", "total", "page_total", "unit_price", "discount")}
     for t, cols in MAP_COLS.items()}
 MAP_DATE = {"faktur_pajak": {"tanggal_transaksi"}, "tanda_terima": {"posting_date"}}
 MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MEI": 5, "MAY": 5, "JUN": 6, "JUL": 7,
@@ -866,6 +866,57 @@ def _issuer_from_path(folder, rel_path=''):
         if m:
             return m.group(1).strip().title().replace("Pt ", "PT ")
     return ""
+
+
+def _tidy_fp_rows(recs):
+    """faktur_penjualan tidy (db-init/11 semantics, applied at write time):
+    the parser's synthetic footer marker row (nama_produk='[PAGE TOTAL]') is not data —
+    spread its DPP/PPN/Page Total onto the item rows of the same page and drop the marker.
+    Plausibility: printed footer total accepted only if >= DPP and == DPP+PPN within 2%
+    (OCR junk like page numbers '2.00' fails this); fallback page_total = DPP+PPN, else
+    the page's own SUM(jumlah). A footer-only page (no items) stays as one honest row
+    labelled FOOTER-ONLY."""
+    items = [r for r in recs if str(r.get("nama_produk") or "").strip() != "[PAGE TOTAL]"]
+    marks = [r for r in recs if str(r.get("nama_produk") or "").strip() == "[PAGE TOTAL]"]
+    if not marks:
+        return items
+    def _plausible(m):
+        dpp, ppn, tot = m.get("dasar_pengenaan_pajak"), m.get("ppn"), m.get("total")
+        if tot is not None and dpp is not None and tot >= dpp \
+           and abs(tot - (dpp + (ppn or 0.0))) <= 0.02 * max(tot, 1.0):
+            return tot
+        return None
+    for m in marks:
+        pg = m.get("source_page")
+        sibs = [r for r in items if r.get("source_page") == pg]
+        pt = _plausible(m)
+        if pt is None and m.get("dasar_pengenaan_pajak") is not None:
+            pt = m["dasar_pengenaan_pajak"] + (m.get("ppn") or 0.0)
+        for r in sibs:
+            if r.get("dasar_pengenaan_pajak") is None:
+                r["dasar_pengenaan_pajak"] = m.get("dasar_pengenaan_pajak")
+            if r.get("ppn") is None:
+                r["ppn"] = m.get("ppn")
+            if r.get("page_total") is None:
+                r["page_total"] = pt
+        if not sibs:
+            keep = dict(m)
+            keep["nama_produk"] = None
+            keep["mapping_status"] = "FOOTER-ONLY"
+            keep["page_total"] = pt if pt is not None else m.get("total")
+            items.append(keep)
+    # pages without any footer marker: page_total = that page's own item sum
+    bypage = {}
+    for r in items:
+        if r.get("nama_produk") is not None:
+            bypage.setdefault(r.get("source_page"), []).append(r)
+    for pg, rs in bypage.items():
+        if all(r.get("page_total") is None for r in rs):
+            s = sum(r["jumlah"] for r in rs if r.get("jumlah") is not None)
+            if s:
+                for r in rs:
+                    r["page_total"] = s
+    return items
 
 
 def _norm_cell(tab, col, v):
@@ -1046,6 +1097,8 @@ async def mapping_rows(doc_id: str, request: Request):
         if tab == "po_customer" and not rec["product_name"]:
             raise HTTPException(422, f"row{i}: product_name required")
         recs.append(rec)
+    if tab == "faktur_penjualan":
+        recs = _tidy_fp_rows(recs)
     errs = gate_rows(tab, recs)
     if errs:
         raise HTTPException(422, {"rejected": errs[:25]})
@@ -1369,6 +1422,8 @@ def map_prompt(tab, rel_path, text):
            if tab == "po_customer" else "")
         + ("nama_pt = the CUSTOMER company (PT) this sales invoice is issued to — read from letterhead/"
            "customer header; leave null if the document does not print it.\n"
+           "page_total = the printed page footer grand total (DPP+PPN) for that page — every item "
+           "row of the same page carries it. Do NOT emit [PAGE TOTAL] marker rows.\n"
            if tab == "faktur_penjualan" else "")
         + ("Ppn column format like '11%' or '1.1%'.\n" if tab == "po_customer" else "")
         + ("Dates dd/mm/yyyy or '16 September 2026' -> keep as written.\n" if tab in ("faktur_pajak", "tanda_terima") else "")
@@ -1468,6 +1523,8 @@ async def _write_rows(did, tab, rows):
         if tab == "po_customer" and not rec["product_name"]:
             errs.append(f"row{i}: product_name required"); continue
         recs.append(rec)
+    if tab == "faktur_penjualan":
+        recs = _tidy_fp_rows(recs)
     errs += gate_rows(tab, recs)
     if errs and not recs:
         raise HTTPException(422, {"rejected": errs[:25]})
